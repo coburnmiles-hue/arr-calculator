@@ -166,9 +166,7 @@ export default function ProcessingCalculator() {
             disabled={files.length === 0 || loading}
             className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-semibold"
           >
-            {loading ? 'Analyzing...' : 'Analyze Statementt-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed whitespace-nowrap"
-          >
-            {loading ? 'Analyzing...' : 'Analyze'}
+            {loading ? 'Analyzing...' : 'Analyze Statement'}
           </button>
         </div>
       </div>
