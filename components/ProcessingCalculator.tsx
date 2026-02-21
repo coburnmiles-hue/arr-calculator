@@ -143,7 +143,9 @@ export default function ProcessingCalculator() {
       {/* Upload Section */}
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
         <h2 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-white">
-         p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Upload Processing Statement
+        </h2>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
           Upload multiple pages of your processing statement
         </p>
         <div className="space-y-3">
