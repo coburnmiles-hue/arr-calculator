@@ -5,8 +5,8 @@ import './globals.css'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'ARR Calculator',
-  description: 'Annual Recurring Revenue Calculator for SaaS businesses',
+  title: 'Credit Card Processing ARR Calculator',
+  description: 'AI-powered tool to analyze processing statements and calculate annual recurring revenue',
 }
 
 export default function RootLayout({

@@ -1,21 +1,28 @@
-# ARR Calculator
+# Credit Card Processing ARR Calculator
 
-A modern web application for calculating and tracking Annual Recurring Revenue (ARR) metrics for SaaS businesses.
+An AI-powered web application that analyzes credit card processing statements and calculates annual recurring revenue (ARR) for sales representatives.
+
+## Features
+
+- 📄 **AI Document Analysis** - Upload processing statements and let Gemini AI extract key data
+- 💳 **Card Breakdown** - Automatically identifies Visa, Mastercard, Amex, and Discover volumes
+- 💰 **4 Pricing Models** - Calculate ARR using:
+  - Interchange Plus
+  - Flat Rate
+  - Tiered Pricing
+  - Dual Pricing
+- 📊 **Profit Analysis** - See your revenue minus interchange costs
+- 🎯 **ARR Calculation** - Instant annual recurring revenue projections
+- 💾 **Cloud Database** - Save and track analyses with Neon PostgreSQL
 
 ## Tech Stack
 
 - **Framework:** Next.js 14 with TypeScript
+- **AI:** Google Gemini 1.5 Flash (Vision API)
 - **Styling:** Tailwind CSS
 - **Database:** Neon (Serverless PostgreSQL)
 - **ORM:** Drizzle ORM
 - **Deployment:** Vercel
-
-## Features
-
-- Calculate ARR, MRR, and ARPU
-- Store calculation history in Neon database
-- Responsive design with dark mode support
-- Real-time calculations
 
 ## Getting Started
 
@@ -23,6 +30,7 @@ A modern web application for calculating and tracking Annual Recurring Revenue (
 
 - Node.js 18+ installed
 - A Neon account ([neon.tech](https://neon.tech))
+- A Google AI account for Gemini API ([ai.google.dev](https://ai.google.dev))
 - A GitHub account
 - A Vercel account ([vercel.com](https://vercel.com))
 
@@ -39,22 +47,20 @@ A modern web application for calculating and tracking Annual Recurring Revenue (
    npm install
    ```
 
-3. **Set up your Neon database:**
-   - Create a new project at [neon.tech](https://neon.tech)
-   - Copy your database connection string
+3. **Set up environment variables:**
    - Create a `.env` file:
      ```bash
      cp .env.example .env
      ```
-   - Add your Neon database URL to `.env`:
+   - Add your credentials:
      ```
      DATABASE_URL=postgresql://user:password@ep-xxx.us-east-2.aws.neon.tech/neondb?sslmode=require
+     GEMINI_API_KEY=your_gemini_api_key_here
      ```
 
-4. **Generate and run database migrations:**
+4. **Run database migrations:**
    ```bash
-   npm run db:generate
-   npm run db:push
+   node migrate.js
    ```
 
 5. **Start the development server:**
@@ -64,79 +70,25 @@ A modern web application for calculating and tracking Annual Recurring Revenue (
 
 6. Open [http://localhost:3000](http://localhost:3000) in your browser
 
-## Database Commands
+## How to Use
 
-- `npm run db:generate` - Generate migration files
-- `npm run db:push` - Push schema changes to database
-- `npm run db:studio` - Open Drizzle Studio for database management
-
-## Deployment to Vercel
-
-### Option 1: Deploy via Vercel Dashboard
-
-1. Push your code to GitHub
-2. Go to [vercel.com](https://vercel.com) and sign in
-3. Click "New Project"
-4. Import your GitHub repository
-5. Add your environment variable:
-   - `DATABASE_URL` = your Neon connection string
-6. Click "Deploy"
-
-### Option 2: Deploy via Vercel CLI
-
-1. Install Vercel CLI:
-   ```bash
-   npm i -g vercel
-   ```
-
-2. Login to Vercel:
-   ```bash
-   vercel login
-   ```
-
-3. Deploy:
-   ```bash
-   vercel
-   ```
-
-4. Add environment variables in Vercel dashboard or via CLI:
-   ```bash
-   vercel env add DATABASE_URL
-   ```
-
-## Project Structure
-
-```
-arr-calculator/
-├── app/
-│   ├── api/
-│   │   └── calculations/
-│   │       └── route.ts          # API endpoints for calculations
-│   ├── globals.css               # Global styles
-│   ├── layout.tsx                # Root layout
-│   └── page.tsx                  # Home page
-├── components/
-│   └── ARRCalculator.tsx         # Main calculator component
-├── lib/
-│   ├── db.ts                     # Database connection
-│   └── schema.ts                 # Database schema
-├── .env.example                  # Environment variables template
-├── drizzle.config.ts             # Drizzle ORM configuration
-├── next.config.js                # Next.js configuration
-├── package.json                  # Dependencies and scripts
-├── tailwind.config.js            # Tailwind CSS configuration
-└── tsconfig.json                 # TypeScript configuration
-```
+1. **Upload a Statement** - Click "Choose File" and select a credit card processing statement (image or PDF)
+2. **Analyze** - Click "Analyze" to let Gemini AI extract the data
+3. **Review Analysis** - Check the extracted volumes, interchange fees, and card breakdown
+4. **Choose Pricing Model** - Select from Interchange Plus, Flat Rate, Tiered, or Dual Pricing
+5. **Enter Your Rates** - Input the rates you plan to charge the merchant
+6. **View ARR** - See your projected monthly profit and annual recurring revenue
 
 ## Environment Variables
 
-Create a `.env` file with the following variables:
+Create a `.env` file with:
 
 ```bash
 DATABASE_URL=your_neon_database_connection_string
+GEMINI_API_KEY=your_google_gemini_api_key
 ```
 
-Remember to add the same environment variables in your Vercel project settings.
+**For Vercel deployment**, add both variables in project settings.
 
 ## Contributing
 
