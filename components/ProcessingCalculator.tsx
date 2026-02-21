@@ -33,7 +33,7 @@ const PRICING_MODELS: PricingModel[] = [
 ]
 
 export default function ProcessingCalculator() {
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
   const [extractedData, setExtractedData] = useState<ExtractedData | null>(null)
   const [selectedModel, setSelectedModel] = useState<string>('interchange_plus')
@@ -56,17 +56,19 @@ export default function ProcessingCalculator() {
   const [cardRate, setCardRate] = useState<string>('0.0')
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0])
+    if (e.target.files && e.target.files.length > 0) {
+      setFiles(Array.from(e.target.files))
     }
   }
 
   const analyzeStatement = async () => {
-    if (!file) return
+    if (files.length === 0) return
 
     setLoading(true)
     const formData = new FormData()
-    formData.append('file', file)
+    files.forEach((file, index) => {
+      formData.append(`files`, file)
+    })
 
     try {
       const response = await fetch('/api/analyze-statement', {
@@ -141,19 +143,28 @@ export default function ProcessingCalculator() {
       {/* Upload Section */}
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
         <h2 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-white">
-          Upload Processing Statement
-        </h2>
-        <div className="flex items-center gap-4">
+         p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Upload multiple pages of your processing statement
+        </p>
+        <div className="space-y-3">
           <input
             type="file"
             accept="image/*,.pdf"
+            multiple
             onChange={handleFileChange}
             className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 dark:file:bg-blue-900 dark:file:text-blue-200"
           />
+          {files.length > 0 && (
+            <div className="text-sm text-gray-600 dark:text-gray-400">
+              {files.length} file{files.length !== 1 ? 's' : ''} selected
+            </div>
+          )}
           <button
             onClick={analyzeStatement}
-            disabled={!file || loading}
-            className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed whitespace-nowrap"
+            disabled={files.length === 0 || loading}
+            className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-semibold"
+          >
+            {loading ? 'Analyzing...' : 'Analyze Statementt-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed whitespace-nowrap"
           >
             {loading ? 'Analyzing...' : 'Analyze'}
           </button>

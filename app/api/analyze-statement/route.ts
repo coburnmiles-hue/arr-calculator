@@ -6,25 +6,20 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData()
-    const file = formData.get('file') as File
+    const files = formData.getAll('files') as File[]
     
-    if (!file) {
-      return NextResponse.json({ error: 'No file provided' }, { status: 400 })
+    if (files.length === 0) {
+      return NextResponse.json({ error: 'No files provided' }, { status: 400 })
     }
 
-    // Convert file to base64
-    const bytes = await file.arrayBuffer()
-    const buffer = Buffer.from(bytes)
-    const base64 = buffer.toString('base64')
-
-    // Use Gemini Vision to analyze the statement
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
     
-    const prompt = `Analyze this credit card processing statement image. Extract the following information in JSON format:
+    const prompt = `Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response:
+
 {
   "restaurantName": "name of the business",
-  "monthlyVolume": total processing volume as a number,
-  "totalInterchange": total interchange fees as a number,
+  "monthlyVolume": total processing volume as a number (sum from all pages),
+  "totalInterchange": total interchange fees as a number (sum from all pages),
   "cardBreakdown": {
     "visa": {"volume": number, "interchange": number, "percentage": number},
     "mastercard": {"volume": number, "interchange": number, "percentage": number},
@@ -33,18 +28,30 @@ export async function POST(request: NextRequest) {
   }
 }
 
-Only return valid JSON. If you can't find a value, use 0. Focus on extracting card types, processing volumes, and interchange amounts.`
+IMPORTANT: 
+- Sum all volumes and fees from all pages
+- Calculate percentages based on total volume
+- Only return valid JSON
+- If you can't find a value, use 0`
 
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          mimeType: file.type,
-          data: base64
+    // Convert all files to base64 and prepare for Gemini
+    const imageParts = await Promise.all(
+      files.map(async (file) => {
+        const bytes = await file.arrayBuffer()
+        const buffer = Buffer.from(bytes)
+        const base64 = buffer.toString('base64')
+        
+        return {
+          inlineData: {
+            mimeType: file.type,
+            data: base64
+          }
         }
-      }
-    ])
+      })
+    )
 
+    // Send all images to Gemini
+    const result = await model.generateContent([prompt, ...imageParts])
     const response = await result.response
     const text = response.text()
     
