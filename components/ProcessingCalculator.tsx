@@ -57,7 +57,9 @@ export default function ProcessingCalculator() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      setFiles(Array.from(e.target.files))
+      const fileArray = Array.from(e.target.files)
+      console.log('Files selected:', fileArray.length)
+      setFiles(fileArray)
     }
   }
 
