@@ -14,48 +14,42 @@ export async function POST(request: NextRequest) {
 
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
     
-    const prompt = `Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response:
+    const prompt = `Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response.
 
+FIRST: Detect the statement format:
+- "card_split" format: Each card network (Visa, Mastercard, Amex, Discover) has separate rows with their own rates
+- "bundled_with_amex" format: Visa/Mastercard/Discover are bundled together with one "Swipe" and "Keyed" row, and Amex has separate rows
+- "other": Any other structure
+
+Then extract:
 {
   "totalVolume": total processing volume as a number (sum from all pages),
   "totalInterchange": total interchange fees as a number (sum from all pages) - this is what the credit card companies and banks charge,
   "totalFees": total ALL fees charged as a number (sum from all pages) - this includes interchange + processor markup + all other fees,
   "perTransactionRate": average per-transaction fee in dollars,
-  "currentProcessingMethod": "Interchange Plus" | "Flat Rate" | "Tiered Pricing" | "Dual Pricing" | "Unknown" - determine based on how fees are structured on the statement,
+  "currentProcessingMethod": "Interchange Plus" | "Flat Rate" | "Tiered Pricing" | "Dual Pricing" | "Unknown",
+  "statementFormat": "card_split" | "bundled_with_amex" | "unknown",
   "cardBreakdown": {
-    "visa": {
-      "volume": number - total amount processed for Visa cards,
-      "rate": number - the percentage rate for Visa (as a decimal, e.g., 0.0275 for 2.75%),
-      "perTransactionFee": number - per transaction fee for Visa in dollars
-    },
-    "mastercard": {
-      "volume": number - total amount processed for Mastercard,
-      "rate": number - the percentage rate for Mastercard (as a decimal),
-      "perTransactionFee": number - per transaction fee for Mastercard in dollars
-    },
-    "amex": {
-      "volume": number - total amount processed for Amex,
-      "rate": number - the percentage rate for Amex (as a decimal),
-      "perTransactionFee": number - per transaction fee for Amex in dollars
-    },
-    "discover": {
-      "volume": number - total amount processed for Discover,
-      "rate": number - the percentage rate for Discover (as a decimal),
-      "perTransactionFee": number - per transaction fee for Discover in dollars
-    }
+    "key1": { "volume": number, "rate": number (as decimal), "perTransactionFee": number },
+    "key2": { "volume": number, "rate": number (as decimal), "perTransactionFee": number }
   }
 }
 
+For cardBreakdown:
+- If card_split format: use keys like "visa", "mastercard", "amex", "discover"
+- If bundled_with_amex format: use keys like "visa_mastercard_discover" (for bundled), "amex", "amex_keyed" (if separate keyed line)
+- Include ONLY the card types that appear on the statement
+- Each key should have volume, rate (as decimal like 0.0275), and perTransactionFee
+- If a specific line shows only "keyed" or "swipe", include that in the key name (e.g., "amex_swipe", "visaMC_keyed")
+
 IMPORTANT: 
 - Sum all volumes and fees from all pages
-- totalInterchange should be ONLY the interchange fees charged by card networks/banks, NOT the processor's markup
-- totalFees should include EVERYTHING charged (interchange + processor fees + transaction fees + all other fees)
-- perTransactionRate is the overall dollar amount per transaction (often shown as "$0.10" or similar)
-- For each card type, extract the specific rate and per-transaction fee if shown separately on the statement
-- If per-transaction fees are NOT shown separately for each card type, use the same perTransactionRate value for all cards
-- Look for indicators like "interchange plus", "flat rate", "qualified/mid-qualified/non-qualified" (tiered), or "cash discount" (dual pricing) to determine the processing method
+- totalInterchange should be ONLY interchange fees charged by card networks, NOT processor markup
+- totalFees should include EVERYTHING charged
+- For bundled cards, if only one rate is shown (and not broken by swipe/keyed), use that rate for the bundled entry
 - Only return valid JSON
-- If you can't find a value, use 0 or "Unknown" as appropriate`
+- Include statementFormat field to help the UI display data correctly
+- If you can't find a value, use 0 or null as appropriate`
 
     // Convert all files to base64 and prepare for Gemini
     const imageParts = await Promise.all(
