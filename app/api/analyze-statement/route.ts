@@ -12,27 +12,50 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 })
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
     
     const prompt = `Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response:
 
 {
-  "restaurantName": "name of the business",
-  "monthlyVolume": total processing volume as a number (sum from all pages),
-  "totalInterchange": total interchange fees as a number (sum from all pages),
+  "totalVolume": total processing volume as a number (sum from all pages),
+  "totalInterchange": total interchange fees as a number (sum from all pages) - this is what the credit card companies and banks charge,
+  "totalFees": total ALL fees charged as a number (sum from all pages) - this includes interchange + processor markup + all other fees,
+  "perTransactionRate": average per-transaction fee in dollars,
+  "currentProcessingMethod": "Interchange Plus" | "Flat Rate" | "Tiered Pricing" | "Dual Pricing" | "Unknown" - determine based on how fees are structured on the statement,
   "cardBreakdown": {
-    "visa": {"volume": number, "interchange": number, "percentage": number},
-    "mastercard": {"volume": number, "interchange": number, "percentage": number},
-    "amex": {"volume": number, "interchange": number, "percentage": number},
-    "discover": {"volume": number, "interchange": number, "percentage": number}
+    "visa": {
+      "volume": number - total amount processed for Visa cards,
+      "rate": number - the percentage rate for Visa (as a decimal, e.g., 0.0275 for 2.75%),
+      "perTransactionFee": number - per transaction fee for Visa in dollars
+    },
+    "mastercard": {
+      "volume": number - total amount processed for Mastercard,
+      "rate": number - the percentage rate for Mastercard (as a decimal),
+      "perTransactionFee": number - per transaction fee for Mastercard in dollars
+    },
+    "amex": {
+      "volume": number - total amount processed for Amex,
+      "rate": number - the percentage rate for Amex (as a decimal),
+      "perTransactionFee": number - per transaction fee for Amex in dollars
+    },
+    "discover": {
+      "volume": number - total amount processed for Discover,
+      "rate": number - the percentage rate for Discover (as a decimal),
+      "perTransactionFee": number - per transaction fee for Discover in dollars
+    }
   }
 }
 
 IMPORTANT: 
 - Sum all volumes and fees from all pages
-- Calculate percentages based on total volume
+- totalInterchange should be ONLY the interchange fees charged by card networks/banks, NOT the processor's markup
+- totalFees should include EVERYTHING charged (interchange + processor fees + transaction fees + all other fees)
+- perTransactionRate is the overall dollar amount per transaction (often shown as "$0.10" or similar)
+- For each card type, extract the specific rate and per-transaction fee if shown separately on the statement
+- If per-transaction fees are NOT shown separately for each card type, use the same perTransactionRate value for all cards
+- Look for indicators like "interchange plus", "flat rate", "qualified/mid-qualified/non-qualified" (tiered), or "cash discount" (dual pricing) to determine the processing method
 - Only return valid JSON
-- If you can't find a value, use 0`
+- If you can't find a value, use 0 or "Unknown" as appropriate`
 
     // Convert all files to base64 and prepare for Gemini
     const imageParts = await Promise.all(
