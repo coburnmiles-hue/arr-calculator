@@ -8,7 +8,7 @@ const poppins = Poppins({
 })
 
 export const metadata: Metadata = {
-  title: 'Processing ARR Calculator',
+  title: 'KI ARR Calculator',
   description: 'AI-powered tool to analyze processing statements and calculate annual recurring revenue',
 }
 

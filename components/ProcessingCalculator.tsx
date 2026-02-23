@@ -132,6 +132,44 @@ export default function ProcessingCalculator() {
     }).format(value)
   }
 
+  const getCardLogo = (cardKey: string) => {
+    // Determine primary card type from key
+    let primaryCard = 'visa'
+    if (cardKey.includes('mastercard') || cardKey.includes('mc')) primaryCard = 'mastercard'
+    else if (cardKey.includes('amex')) primaryCard = 'amex'
+    else if (cardKey.includes('discover')) primaryCard = 'discover'
+    
+    const logos: Record<string, JSX.Element> = {
+      'visa': (
+        <svg width="32" height="24" viewBox="0 0 32 24" className="inline-block mr-2">
+          <rect width="32" height="24" rx="2" fill="#1A1F71" />
+          <text x="50%" y="50%" textAnchor="middle" dy="0.3em" fill="white" fontSize="10" fontWeight="bold" fontFamily="Arial">VISA</text>
+        </svg>
+      ),
+      'mastercard': (
+        <svg width="32" height="24" viewBox="0 0 32 24" className="inline-block mr-2">
+          <rect width="32" height="24" rx="2" fill="#EB001B" />
+          <circle cx="13" cy="12" r="6" fill="#FF5F00" />
+          <circle cx="19" cy="12" r="6" fill="#FFD700" opacity="0.8" />
+        </svg>
+      ),
+      'amex': (
+        <svg width="32" height="24" viewBox="0 0 32 24" className="inline-block mr-2">
+          <rect width="32" height="24" rx="2" fill="#006FCF" />
+          <text x="50%" y="50%" textAnchor="middle" dy="0.3em" fill="white" fontSize="10" fontWeight="bold" fontFamily="Arial">AXP</text>
+        </svg>
+      ),
+      'discover': (
+        <svg width="32" height="24" viewBox="0 0 32 24" className="inline-block mr-2">
+          <rect width="32" height="24" rx="2" fill="#FF6000" />
+          <circle cx="17" cy="12" r="4" fill="white" />
+        </svg>
+      )
+    }
+    
+    return logos[primaryCard] || null
+  }
+
   const formatCardTypeName = (cardKey: string) => {
     // Format card type keys for readable display
     // e.g., "visa_mastercard_discover" -> "Visa/MC/Discover"
@@ -158,10 +196,10 @@ export default function ProcessingCalculator() {
     
     // Single card types
     const cardNames: Record<string, string> = {
-      'visa': '💳 Visa',
-      'mastercard': '💳 Mastercard',
-      'amex': '💳 American Express',
-      'discover': '💳 Discover'
+      'visa': 'Visa',
+      'mastercard': 'Mastercard',
+      'amex': 'American Express',
+      'discover': 'Discover'
     }
     
     return cardNames[cardKey] || (cardKey.charAt(0).toUpperCase() + cardKey.slice(1))
@@ -363,6 +401,88 @@ export default function ProcessingCalculator() {
     
     const weightedRate = totalWeightedRate / totalVolume
     return weightedRate * 100
+  }
+
+  // Calculate weighted average per-transaction fee from card-specific fees
+  const calculateWeightedPerTransactionRate = () => {
+    if (!extractedData) return 0
+    
+    const { cardBreakdown, totalVolume } = extractedData
+    
+    // Estimate number of transactions using average ticket size
+    // Restaurant industry standard: ~$50 average ticket
+    const avgTicket = 50
+    const estimatedTotalTransactions = totalVolume / avgTicket
+    
+    // Calculate total per-transaction fees based on volume
+    let totalPerTransactionCosts = 0
+    Object.entries(cardBreakdown).forEach(([_, data]) => {
+      const cardTransactions = data.volume / avgTicket
+      totalPerTransactionCosts += (data.perTransactionFee * cardTransactions)
+    })
+    
+    // Average per-transaction fee
+    if (estimatedTotalTransactions === 0) return 0
+    return totalPerTransactionCosts / estimatedTotalTransactions
+  }
+
+  // Calculate total dollars spent on processing rate fees
+  const calculateProcessingFeesDollars = () => {
+    if (!extractedData) return 0
+    const processingRate = calculateProcessingRate() / 100
+    return extractedData.totalVolume * processingRate
+  }
+
+  // Calculate total dollars spent on per-transaction fees
+  const calculateTransactionFeesDollars = () => {
+    if (!extractedData) return 0
+    
+    const { cardBreakdown, totalVolume } = extractedData
+    const avgTicket = 50
+    const estimatedTotalTransactions = totalVolume / avgTicket
+    
+    let totalPerTransactionCosts = 0
+    Object.entries(cardBreakdown).forEach(([_, data]) => {
+      const cardTransactions = data.volume / avgTicket
+      totalPerTransactionCosts += (data.perTransactionFee * cardTransactions)
+    })
+    
+    return totalPerTransactionCosts
+  }
+
+  // Calculate combined effective rate (processing + per-transaction as a percentage)
+  const calculateEffectiveRate = () => {
+    if (!extractedData) return 0
+    
+    const processingFees = calculateProcessingFeesDollars()
+    const transactionFees = calculateTransactionFeesDollars()
+    const totalCost = processingFees + transactionFees
+    
+    return (totalCost / extractedData.totalVolume) * 100
+  }
+
+  // Calculate total fees for a specific card type
+  const calculateCardFees = (cardData: any) => {
+    const avgTicket = 50
+    const cardTransactions = cardData.volume / avgTicket
+    
+    // Card fees = percentage-based fees + per-transaction fees
+    const rateBasedFees = cardData.volume * cardData.rate
+    const transactionBasedFees = cardData.perTransactionFee * cardTransactions
+    
+    return rateBasedFees + transactionBasedFees
+  }
+
+  // Calculate rate-based fees for a specific card
+  const calculateCardRateBasedFees = (cardData: any) => {
+    return cardData.volume * cardData.rate
+  }
+
+  // Calculate transaction-based fees for a specific card
+  const calculateCardTransactionBasedFees = (cardData: any) => {
+    const avgTicket = 50
+    const cardTransactions = cardData.volume / avgTicket
+    return cardData.perTransactionFee * cardTransactions
   }
 
   // Save current analysis
@@ -589,10 +709,10 @@ export default function ProcessingCalculator() {
             <div className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-900/30 dark:to-red-800/30 p-6 rounded-xl border border-red-200 dark:border-red-700">
               <p className="text-sm font-semibold text-red-700 dark:text-red-300 uppercase tracking-wider">True Effective Rate</p>
               <p className="text-3xl font-bold text-red-600 dark:text-red-400 mt-2">
-                {((extractedData.totalFees / extractedData.totalVolume) * 100).toFixed(2)}%
+                {calculateEffectiveRate().toFixed(2)}%
               </p>
               <p className="text-xs text-red-600 dark:text-red-400 mt-2 font-medium">
-                {formatCurrency(extractedData.totalFees)} total
+                {formatCurrency(calculateProcessingFeesDollars() + calculateTransactionFeesDollars())} total
               </p>
             </div>
             <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
@@ -601,16 +721,16 @@ export default function ProcessingCalculator() {
                 {calculateProcessingRate().toFixed(2)}%
               </p>
               <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
-                weighted average
+                {formatCurrency(calculateProcessingFeesDollars())} spent
               </p>
             </div>
             <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
               <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Per Transaction</p>
               <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
-                {formatCurrency(extractedData.perTransactionRate)}
+                {formatCurrency(calculateWeightedPerTransactionRate())}
               </p>
               <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">
-                per transaction
+                {formatCurrency(calculateTransactionFeesDollars())} total
               </p>
             </div>
           </div>
@@ -621,7 +741,10 @@ export default function ProcessingCalculator() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {Object.entries(extractedData.cardBreakdown).map(([card, data]) => (
                 <div key={card} className="bg-gradient-to-br from-gray-50 to-gray-100 dark:from-slate-700 dark:to-slate-800 p-6 rounded-xl border border-gray-200 dark:border-slate-600 hover:shadow-md transition-all duration-200">
-                  <p className="text-xs text-gray-600 dark:text-gray-400 uppercase font-bold tracking-wider mb-3">{formatCardTypeName(card)}</p>
+                  <div className="flex items-center mb-3">
+                    {getCardLogo(card)}
+                    <p className="text-xs text-gray-600 dark:text-gray-400 uppercase font-bold tracking-wider">{formatCardTypeName(card)}</p>
+                  </div>
                   <div className="space-y-3">
                     <div>
                       <p className="text-2xl font-bold text-gray-900 dark:text-white">
@@ -633,14 +756,30 @@ export default function ProcessingCalculator() {
                     </div>
                     <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
                       <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Rate</p>
-                      <p className="text-lg font-bold text-blue-600 dark:text-blue-400 mt-1">
-                        {(data.rate * 100).toFixed(2)}%
-                      </p>
+                      <div className="flex items-baseline justify-between mt-1">
+                        <p className="text-lg font-bold text-blue-600 dark:text-blue-400">
+                          {(data.rate * 100).toFixed(2)}%
+                        </p>
+                        <p className="text-sm text-blue-600 dark:text-blue-400 font-medium">
+                          {formatCurrency(calculateCardRateBasedFees(data))}
+                        </p>
+                      </div>
                     </div>
                     <div>
                       <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Per Transaction</p>
-                      <p className="text-lg font-bold text-green-600 dark:text-green-400 mt-1">
-                        {formatCurrency(data.perTransactionFee)}
+                      <div className="flex items-baseline justify-between mt-1">
+                        <p className="text-lg font-bold text-green-600 dark:text-green-400">
+                          {formatCurrency(data.perTransactionFee)}
+                        </p>
+                        <p className="text-sm text-green-600 dark:text-green-400 font-medium">
+                          {formatCurrency(calculateCardTransactionBasedFees(data))}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
+                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Total Fees</p>
+                      <p className="text-lg font-bold text-orange-600 dark:text-orange-400 mt-1">
+                        {formatCurrency(calculateCardFees(data))}
                       </p>
                     </div>
                   </div>

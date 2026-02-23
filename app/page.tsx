@@ -34,7 +34,7 @@ export default function Home() {
         {/* Header */}
         <div className="mb-12">
           <h1 className="text-5xl sm:text-6xl font-bold text-center mb-4 bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-400 dark:to-indigo-400 bg-clip-text text-transparent">
-            Processing ARR Calculator
+            KI ARR Calculator
           </h1>
           <p className="text-center text-gray-600 dark:text-gray-400 text-lg">
             Analyze merchant statements and calculate your revenue opportunities

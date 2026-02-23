@@ -5,12 +5,22 @@ export async function POST(request: NextRequest) {
   try {
     const { username, password } = await request.json()
 
-    // Get credentials from environment variables
-    const validUsername = process.env.AUTH_USERNAME || 'mcoburn'
-    const validPassword = process.env.AUTH_PASSWORD || 'coburn8675!'
+    // Define valid user accounts
+    const validUsers = [
+      {
+        username: 'mcoburn',
+        password: 'coburn8675!'
+      },
+      {
+        username: 'dtorres',
+        password: 'torres1234!'
+      }
+    ]
 
-    // Validate credentials
-    if (username !== validUsername || password !== validPassword) {
+    // Validate credentials against valid users
+    const user = validUsers.find(u => u.username === username && u.password === password)
+    
+    if (!user) {
       return NextResponse.json(
         { error: 'Invalid username or password' },
         { status: 401 }
