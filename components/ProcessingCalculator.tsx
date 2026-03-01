@@ -465,15 +465,20 @@ export default function ProcessingCalculator() {
     return (totalCost / extractedData.totalVolume) * 100
   }
 
+  // Computed current cost (sum of processing fees + transaction fees)
+  const computedCurrentCost = extractedData ? (calculateProcessingFeesDollars() + calculateTransactionFeesDollars()) : 0
+
   // Calculate total fees for a specific card type
   const calculateCardFees = (cardData: any) => {
-    const avgTicket = 50
-    const cardTransactions = cardData.volume / avgTicket
-    
+    const avgTicket = cardData.averageTicketSize || extractedData?.averageTicketSize || 50
+    const cardTransactions = cardData.transactionCount && cardData.transactionCount > 0
+      ? cardData.transactionCount
+      : (avgTicket > 0 ? (cardData.volume / avgTicket) : 0)
+
     // Card fees = percentage-based fees + per-transaction fees
     const rateBasedFees = cardData.volume * cardData.rate
-    const transactionBasedFees = cardData.perTransactionFee * cardTransactions
-    
+    const transactionBasedFees = (cardData.perTransactionFee || 0) * cardTransactions
+
     return rateBasedFees + transactionBasedFees
   }
 
@@ -484,9 +489,11 @@ export default function ProcessingCalculator() {
 
   // Calculate transaction-based fees for a specific card
   const calculateCardTransactionBasedFees = (cardData: any) => {
-    const avgTicket = 50
-    const cardTransactions = cardData.volume / avgTicket
-    return cardData.perTransactionFee * cardTransactions
+    const avgTicket = cardData.averageTicketSize || extractedData?.averageTicketSize || 50
+    const cardTransactions = cardData.transactionCount && cardData.transactionCount > 0
+      ? cardData.transactionCount
+      : (avgTicket > 0 ? (cardData.volume / avgTicket) : 0)
+    return (cardData.perTransactionFee || 0) * cardTransactions
   }
 
   // Save current analysis
@@ -723,7 +730,7 @@ export default function ProcessingCalculator() {
             <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/30 p-6 rounded-xl border border-blue-200 dark:border-blue-700">
               <p className="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider">Current Spend</p>
               <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-2">
-                {formatCurrency(extractedData.totalFees)}
+                {formatCurrency(computedCurrentCost)}
               </p>
               <p className="text-xs text-blue-600 dark:text-blue-400 mt-2 font-medium">
                 this month
@@ -1022,7 +1029,7 @@ export default function ProcessingCalculator() {
             const newCosts = calculateNewCosts()
             if (!newCosts) return null
             
-            const currentCost = extractedData.totalFees
+            const currentCost = computedCurrentCost
             const monthlySavings = currentCost - newCosts.totalCost
             const annualSavings = monthlySavings * 12
             const monthlyProfit = newCosts.profit
