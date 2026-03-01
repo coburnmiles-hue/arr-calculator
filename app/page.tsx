@@ -33,12 +33,23 @@ export default function Home() {
 
         {/* Header */}
         <div className="mb-12">
-          <h1 className="text-5xl sm:text-6xl font-bold text-center mb-4 bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-400 dark:to-indigo-400 bg-clip-text text-transparent">
-            KI ARR Calculator
-          </h1>
-          <p className="text-center text-gray-600 dark:text-gray-400 text-lg">
-            Analyze merchant statements and calculate your revenue opportunities
-          </p>
+          <div className="flex flex-col items-center">
+            <div className="flex items-center gap-6">
+              <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-sky-500 via-indigo-600 to-emerald-400 flex items-center justify-center text-white font-extrabold text-lg shadow-2xl transform -rotate-6">
+                KI
+              </div>
+
+              <div className="text-left">
+                <h1 className="flex items-baseline gap-4">
+                  <span className="text-6xl sm:text-7xl md:text-8xl font-extrabold title-glow animated-gradient bg-gradient-to-r from-indigo-500 via-sky-400 to-emerald-300 bg-clip-text text-transparent">
+                    ARR
+                  </span>
+                  <span className="text-2xl sm:text-3xl font-semibold text-gray-700 dark:text-gray-300 mt-2">Calculator</span>
+                </h1>
+                <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">&nbsp;</p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <ProcessingCalculator />
