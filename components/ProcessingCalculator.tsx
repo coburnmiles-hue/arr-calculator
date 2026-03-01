@@ -6,6 +6,8 @@ interface CardBreakdownData {
   volume: number
   rate: number
   perTransactionFee: number
+  averageTicketSize?: number
+  transactionCount?: number
 }
 
 interface ExtractedData {
@@ -13,6 +15,8 @@ interface ExtractedData {
   totalInterchange: number
   totalFees: number
   perTransactionRate: number
+  averageTicketSize?: number
+  transactionCount?: number
   currentProcessingMethod: string
   cardBreakdown: Record<string, CardBreakdownData>
   statementFormat?: 'card_split' | 'bundled_with_amex' | 'unknown'
@@ -683,8 +687,8 @@ export default function ProcessingCalculator() {
             )}
           </div>
           
-          {/* Basic Info */}
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+          {/* Basic Info - top row (Total Volume, Processing Method, Average Ticket) */}
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
             <div className="bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-700 dark:to-slate-800 p-6 rounded-xl border border-gray-200 dark:border-slate-600">
               <p className="text-sm font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider">Total Volume</p>
               <p className="text-3xl font-bold text-gray-900 dark:text-white mt-2">
@@ -697,6 +701,25 @@ export default function ProcessingCalculator() {
                 {extractedData.currentProcessingMethod}
               </p>
             </div>
+            <div className="bg-gradient-to-br from-yellow-50 to-yellow-100 dark:from-yellow-900/30 dark:to-yellow-800/30 p-6 rounded-xl border border-yellow-200 dark:border-yellow-700">
+              <p className="text-sm font-semibold text-yellow-700 dark:text-yellow-300 uppercase tracking-wider">Average Ticket</p>
+              <p className="text-3xl font-bold text-yellow-600 dark:text-yellow-400 mt-2">
+                {formatCurrency(
+                  extractedData.averageTicketSize && extractedData.averageTicketSize > 0
+                    ? extractedData.averageTicketSize
+                    : (extractedData.transactionCount && extractedData.transactionCount > 0)
+                      ? (extractedData.totalVolume / extractedData.transactionCount)
+                      : 0
+                )}
+              </p>
+              <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-2 font-medium">
+                {extractedData.transactionCount ? `${extractedData.transactionCount} txns` : 'transactions unknown'}
+              </p>
+            </div>
+          </div>
+
+          {/* Metrics row: Current Spend, True Effective Rate, Processing Rate, Per Transaction */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
             <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/30 p-6 rounded-xl border border-blue-200 dark:border-blue-700">
               <p className="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider">Current Spend</p>
               <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-2">
@@ -753,6 +776,11 @@ export default function ProcessingCalculator() {
                       <p className="text-xs text-gray-600 dark:text-gray-400 font-medium mt-1">
                         {((data.volume / extractedData.totalVolume) * 100).toFixed(1)}% of volume
                       </p>
+                    </div>
+                    <div className="pt-3">
+                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Avg Ticket</p>
+                      <p className="text-lg font-bold text-yellow-600 dark:text-yellow-400 mt-1">{formatCurrency(data.averageTicketSize ?? 0)}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{data.transactionCount ? `${data.transactionCount} txns` : ''}</p>
                     </div>
                     <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
                       <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Rate</p>

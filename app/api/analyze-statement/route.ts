@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
     
     const prompt = `Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response.
 
-FIRST: Detect the statement format:
+  FIRST: Detect the statement format:
 - "card_split" format: Each card network (Visa, Mastercard, Amex, Discover) has separate rows with their own rates
 - "bundled_with_amex" format: Visa/Mastercard/Discover are bundled together with one "Swipe" and "Keyed" row, and Amex has separate rows
 - "other": Any other structure
@@ -29,7 +29,7 @@ SECOND: Detect the processing method - look for these specific indicators:
 - "Flat Rate": All cards are charged at ONE single percentage rate
 - "Dual Pricing": Shows "Cash Discount" or shows two pricing tiers (one rate, one surcharge)
 
-FINDING PER-TRANSACTION FEES - BE THOROUGH:
+  FINDING PER-TRANSACTION FEES - BE THOROUGH:
 Look for per-transaction fees using MULTIPLE strategies:
 1. Search for sections labeled "Per Transaction", "Per Txn", "Transaction Fee", "Authorization Detail", "Auth Detail", or "Interchange Detail"
 2. Look for SMALL DOLLAR AMOUNTS in cents next to card types (e.g., "$0.15", "$0.25", "$0.10", "$0.30", "15¢", "25¢")
@@ -42,12 +42,15 @@ Look for per-transaction fees using MULTIPLE strategies:
 5. If there's a "Total Fees" line and you can identify the number of transactions, calculate per-transaction fee
 6. Look for fee schedules or rate tables that show both percentage and per-transaction fees
 
+Also: extract the average ticket size (average sale amount) when present as a dollar value.
+
 Then extract:
 {
   "totalVolume": total processing volume as a number (sum from all pages),
   "totalInterchange": total interchange fees as a number (sum from all pages) - ONLY the interchange line item, NOT processor markup,
   "totalFees": total ALL fees charged as a number (sum from all pages) - everything combined,
   "perTransactionRate": the average per-transaction fee in dollars (e.g. 0.15 for 15 cents, NOT the total),
+  "averageTicketSize": the average sale amount in dollars (e.g. 45.50) - use this to estimate transaction counts when explicit counts are not present,
   "currentProcessingMethod": "Interchange Plus" | "Flat Rate" | "Tiered Pricing" | "Dual Pricing" | "Unknown",
   "statementFormat": "card_split" | "bundled_with_amex" | "unknown",
   "cardBreakdown": {
@@ -61,7 +64,7 @@ For cardBreakdown:
 - If bundled_with_amex format: use keys like "visa_mastercard_discover" (for bundled), "amex", "amex_keyed" (if separate keyed line)
 - For tiered pricing: create separate entries for each tier with their respective rates (e.g., "check_card", "qualified", "mid_qualified", "non_qualified")
 - Include ONLY the card types or tiers that appear on the statement
-- Each key should have volume, rate (as decimal like 0.0275 for 2.75%), and perTransactionFee (dollar amount like 0.10 for $0.10)
+- Each key should have volume, rate (as decimal like 0.0275 for 2.75%), perTransactionFee (dollar amount like 0.10 for $0.10), and 'averageTicketSize' (dollar amount like 45.50). If a per-card 'averageTicketSize' isn't available, return 0 or omit and the service will fallback to the global 'averageTicketSize'.
 - If fees differ by Swipe vs Keyed, create separate entries (e.g., "visa_swipe": {...perTransactionFee: 0.10}, "visa_keyed": {...perTransactionFee: 0.15})
 - If a specific line shows only "keyed" or "swipe", include that in the key name (e.g., "amex_swipe", "visaMC_keyed")
 
@@ -72,7 +75,7 @@ IMPORTANT:
 - perTransactionRate MUST be a single average number representing cost per transaction in dollars (not a total, not a range)
   * If you find multiple per-transaction rates on the statement, calculate the weighted average
   * If you can't find a clear per-transaction fee, look carefully at fee schedules and small dollar amounts
-  * Do NOT use transaction counts - use the actual per-transaction fee amounts listed on the statement
+  * If per-transaction fees are not explicitly present but 'averageTicketSize' and 'totalVolume' are, estimate transaction count as totalVolume / averageTicketSize and compute an estimated perTransactionRate = totalFees / estimatedTransactionCount. Indicate in the returned JSON when the per-transaction rate was estimated.
 - For tiered pricing with multiple tiers: extract the volume and rate for EACH tier separately in cardBreakdown
 - Only return valid JSON
 - Include statementFormat field to help the UI display data correctly
@@ -107,7 +110,80 @@ IMPORTANT:
       throw new Error('Failed to extract data from statement')
     }
 
-    return NextResponse.json({ data: extractedData })
+    // Post-process: ensure numeric fields and compute estimated per-transaction rate
+    const data = extractedData as any
+    data.averageTicketSize = data.averageTicketSize ?? 0
+    data.totalVolume = data.totalVolume ?? 0
+    data.totalFees = data.totalFees ?? 0
+
+    // Normalize numeric values if strings
+    const toNum = (v: any) => {
+      if (typeof v === 'number') return v
+      if (typeof v === 'string') {
+        const n = Number(v.replace(/[^0-9.-]+/g, ''))
+        return Number.isNaN(n) ? 0 : n
+      }
+      return 0
+    }
+
+    data.averageTicketSize = toNum(data.averageTicketSize)
+    data.totalVolume = toNum(data.totalVolume)
+    data.totalFees = toNum(data.totalFees)
+
+    // Normalize and ensure per-card averageTicketSize exists
+    if (data.cardBreakdown && typeof data.cardBreakdown === 'object') {
+      for (const key of Object.keys(data.cardBreakdown)) {
+        const card = data.cardBreakdown[key] || {}
+        card.volume = toNum(card.volume)
+        card.rate = toNum(card.rate)
+        card.perTransactionFee = toNum(card.perTransactionFee)
+        // Normalize possible transaction count fields for per-card
+        card.transactionCount = toNum(card.transactionCount ?? card.transactions ?? card.totalTransactions ?? card.txns ?? 0)
+
+        // Prefer per-card averageTicketSize, otherwise fallback to overall averageTicketSize
+        card.averageTicketSize = toNum(card.averageTicketSize ?? 0)
+        if (!card.averageTicketSize) {
+          if (card.transactionCount > 0 && card.volume > 0) {
+            card.averageTicketSize = Number((card.volume / card.transactionCount).toFixed(4))
+          } else {
+            card.averageTicketSize = toNum(data.averageTicketSize)
+          }
+        }
+        data.cardBreakdown[key] = card
+      }
+    }
+
+    // Normalize possible global transaction count fields
+    data.transactionCount = toNum(data.transactionCount ?? data.transactions ?? data.totalTransactions ?? data.txns ?? 0)
+
+    // If averageTicketSize missing, but we have totalVolume and transactionCount, compute it
+    if ((!data.averageTicketSize || data.averageTicketSize === 0) && data.totalVolume > 0 && data.transactionCount > 0) {
+      data.averageTicketSize = Number((data.totalVolume / data.transactionCount).toFixed(4))
+      data.averageTicketSizeEstimated = true
+    } else {
+      data.averageTicketSizeEstimated = false
+    }
+
+    // If perTransactionRate missing or zero, try to estimate using averageTicketSize
+    if (!data.perTransactionRate || data.perTransactionRate === 0) {
+      if (data.averageTicketSize > 0 && data.totalVolume > 0 && data.totalFees > 0) {
+        const estimatedTxCount = data.totalVolume / data.averageTicketSize
+        if (estimatedTxCount > 0) {
+          data.perTransactionRate = Number((data.totalFees / estimatedTxCount).toFixed(4))
+          data.perTransactionRateEstimated = true
+        } else {
+          data.perTransactionRate = 0
+          data.perTransactionRateEstimated = false
+        }
+      } else {
+        data.perTransactionRate = data.perTransactionRate ?? 0
+        data.perTransactionRateEstimated = false
+      }
+    } else {
+      data.perTransactionRateEstimated = false
+    }
+
+    return NextResponse.json({ data })
   } catch (error) {
     console.error('Error analyzing statement:', error)
     return NextResponse.json(
