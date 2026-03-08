@@ -8,12 +8,16 @@ export async function POST(request: NextRequest) {
     // Define valid user accounts
     const validUsers = [
       {
-        username: 'mcoburn',
-        password: 'coburn8675!'
+        username: 'Mcoburn',
+        password: 'coburn145!'
       },
       {
         username: 'dtorres',
         password: 'torres1234!'
+      },
+      {
+        username: 'nramos',
+        password: 'ramos336!'
       }
     ]
 
