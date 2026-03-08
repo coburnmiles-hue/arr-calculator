@@ -10,6 +10,10 @@ const poppins = Poppins({
 export const metadata: Metadata = {
   title: 'KI ARR Calculator',
   description: 'AI-powered tool to analyze processing statements and calculate annual recurring revenue',
+  icons: {
+    icon: [{ url: '/favicon-v1-32x32.png?v=1', sizes: '32x32', type: 'image/png' }],
+    apple: [{ url: '/apple-touch-icon-v1-180x180.png?v=1', sizes: '180x180', type: 'image/png' }],
+  },
 }
 
 export default function RootLayout({
