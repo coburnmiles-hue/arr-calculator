@@ -20,6 +20,8 @@ interface ExtractedData {
   currentProcessingMethod: string
   cardBreakdown: Record<string, CardBreakdownData>
   statementFormat?: 'card_split' | 'bundled_with_amex' | 'unknown'
+  processorMarkupRate?: number
+  processorPerAuthFee?: number
 }
 
 interface SavedAnalysis {
@@ -251,9 +253,13 @@ export default function ProcessingCalculator() {
 
     const { totalVolume, totalInterchange, cardBreakdown } = extractedData
     
-    // Estimate number of transactions (using average transaction size from volume)
-    // Assume average ticket of $45 for restaurant (industry standard)
-    const estimatedTransactions = Math.round(totalVolume / 45)
+    // Use actual transaction count from statement when available, otherwise estimate
+    const avgTicketFallback = extractedData.averageTicketSize && extractedData.averageTicketSize > 0
+      ? extractedData.averageTicketSize
+      : 45
+    const estimatedTransactions = extractedData.transactionCount && extractedData.transactionCount > 0
+      ? extractedData.transactionCount
+      : Math.round(totalVolume / avgTicketFallback)
     
     // Calculate estimated interchange costs
     const interchangeEstimate = estimateInterchangeCosts(totalVolume, estimatedTransactions)
