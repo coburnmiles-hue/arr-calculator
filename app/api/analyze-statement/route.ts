@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 })
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
     
     const prompt = `Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response.
 
@@ -48,6 +48,13 @@ If the statement is Interchange Plus, follow these specific rules:
    - These are labeled as "Service charges" in the fee type column.
    - Also look for per-authorization fees: "WATS AUTH FEE X TRANSACTIONS AT $0.09", "NETWORK ACCESS AUTH FEE X TRANSACTIONS AT $0.0295".
    - Report the processor markup rate as "processorMarkupRate" (e.g., 0.0028) and per-auth fee as "processorPerAuthFee" (e.g., 0.09).
+
+2b. FINDING the INTERCHANGE PER-TRANSACTION FEE (separate from processor per-auth):
+   - Each interchange category in the Interchange Detail section has a rate structure like "1.54% + $0.10" or "2.20% + $0.10".
+   - The "+ $0.10" (or similar ¢ amount) is the INTERCHANGE's own per-transaction fee charged by the card networks — this is SEPARATE from the processor's per-auth fee above.
+   - To find the blended interchange per-transaction fee: look at the individual category lines in the Interchange Detail/Charges section. Many will show a rate like "VISA CPS RESTAURANT 1.54% $0.10" or a column labeled "Per Item" or "Per Txn" next to each category.
+   - Compute the weighted average: sum(per_txn_fee_for_category × transactions_in_category) / total_transactions. If you cannot get per-category transaction counts, use a simple average of the per-transaction fees you see across categories.
+   - Report this as "interchangePerTxnFee" (e.g., 0.08 for 8 cents). If you cannot find individual category per-transaction fees, set to 0.
 
 3. FINDING cardBreakdown for I+ statements:
    - Use volumes and transaction counts from the "Summary by Card Type" section.
@@ -86,7 +93,8 @@ Return this JSON:
   "currentProcessingMethod": "Interchange Plus" | "Flat Rate" | "Tiered Pricing" | "Dual Pricing" | "Unknown",
   "statementFormat": "card_split" | "bundled_with_amex" | "unknown",
   "processorMarkupRate": for I+ only - the processor's markup percentage as decimal (e.g. 0.0028 for 0.28%), or 0 if not I+,
-  "processorPerAuthFee": for I+ only - the per-authorization fee in dollars (e.g. 0.09), or 0 if not I+,
+  "processorPerAuthFee": for I+ only - the processor's per-authorization fee in dollars (e.g. 0.09), or 0 if not I+,
+  "interchangePerTxnFee": for I+ only - the blended per-transaction fee charged by the card networks within the interchange categories (e.g. 0.08 for 8 cents). Look for the "+ $X.XX" portion of interchange category rate lines. Set to 0 if not found or not I+,
   "cardBreakdown": {
     "key1": { "volume": number, "rate": number (as decimal), "perTransactionFee": number, "transactionCount": number, "averageTicketSize": number },
     "key2": { ... }
@@ -119,10 +127,24 @@ IMPORTANT:
         const bytes = await file.arrayBuffer()
         const buffer = Buffer.from(bytes)
         const base64 = buffer.toString('base64')
-        
+
+        // Normalize MIME type — Gemini requires specific values
+        let mimeType = file.type
+        if (!mimeType || mimeType === 'application/octet-stream') {
+          const name = file.name?.toLowerCase() ?? ''
+          if (name.endsWith('.pdf')) mimeType = 'application/pdf'
+          else if (name.endsWith('.png')) mimeType = 'image/png'
+          else if (name.endsWith('.jpg') || name.endsWith('.jpeg')) mimeType = 'image/jpeg'
+          else if (name.endsWith('.webp')) mimeType = 'image/webp'
+          else if (name.endsWith('.heic') || name.endsWith('.heif')) mimeType = 'image/heic'
+          else mimeType = 'image/jpeg' // fallback
+        }
+
+        console.log(`File: ${file.name}, type: ${file.type}, normalized: ${mimeType}, size: ${buffer.length} bytes`)
+
         return {
           inlineData: {
-            mimeType: file.type,
+            mimeType,
             data: base64
           }
         }
@@ -130,9 +152,11 @@ IMPORTANT:
     )
 
     // Send all images to Gemini
+    console.log(`Sending ${imageParts.length} file(s) to Gemini model: ${model.model}`)
     const result = await model.generateContent([prompt, ...imageParts])
     const response = await result.response
     const text = response.text()
+    console.log('Gemini raw response length:', text.length)
     
     // Extract JSON from response (remove markdown formatting if present)
     const jsonMatch = text.match(/\{[\s\S]*\}/)
@@ -149,6 +173,7 @@ IMPORTANT:
     data.totalFees = data.totalFees ?? 0
     data.processorMarkupRate = data.processorMarkupRate ?? 0
     data.processorPerAuthFee = data.processorPerAuthFee ?? 0
+    data.interchangePerTxnFee = data.interchangePerTxnFee ?? 0
 
     // Normalize numeric values if strings
     const toNum = (v: any) => {
@@ -165,6 +190,7 @@ IMPORTANT:
     data.totalFees = toNum(data.totalFees)
     data.processorMarkupRate = toNum(data.processorMarkupRate)
     data.processorPerAuthFee = toNum(data.processorPerAuthFee)
+    data.interchangePerTxnFee = toNum(data.interchangePerTxnFee)
 
     // Normalize and ensure per-card averageTicketSize exists
     if (data.cardBreakdown && typeof data.cardBreakdown === 'object') {
@@ -222,8 +248,9 @@ IMPORTANT:
     return NextResponse.json({ data })
   } catch (error) {
     console.error('Error analyzing statement:', error)
+    const message = error instanceof Error ? error.message : String(error)
     return NextResponse.json(
-      { error: 'Failed to analyze statement' },
+      { error: 'Failed to analyze statement', detail: message },
       { status: 500 }
     )
   }

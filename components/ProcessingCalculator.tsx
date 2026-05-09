@@ -22,6 +22,7 @@ interface ExtractedData {
   statementFormat?: 'card_split' | 'bundled_with_amex' | 'unknown'
   processorMarkupRate?: number
   processorPerAuthFee?: number
+  interchangePerTxnFee?: number
 }
 
 interface SavedAnalysis {
@@ -73,6 +74,9 @@ export default function ProcessingCalculator() {
   const [interchangePlusMarkup, setInterchangePlusMarkup] = useState<string>('')
   const [interchangePlusPerTransactionFee, setInterchangePlusPerTransactionFee] = useState<string>('')
 
+  // Customer-facing mode — hides profit figures
+  const [showProfit, setShowProfit] = useState<boolean>(true)
+
   // Load saved analyses from localStorage on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -121,6 +125,9 @@ export default function ProcessingCalculator() {
       const result = await response.json()
       if (result.data) {
         setExtractedData(result.data)
+      } else {
+        const detail = result.detail ? `\n\n${result.detail}` : ''
+        alert(`Failed to analyze statement.${detail}`)
       }
     } catch (error) {
       console.error('Error analyzing statement:', error)
@@ -460,15 +467,10 @@ export default function ProcessingCalculator() {
     return totalPerTransactionCosts
   }
 
-  // Calculate combined effective rate (processing + per-transaction as a percentage)
+  // True effective rate = all fees paid / total volume (from actual statement)
   const calculateEffectiveRate = () => {
-    if (!extractedData) return 0
-    
-    const processingFees = calculateProcessingFeesDollars()
-    const transactionFees = calculateTransactionFeesDollars()
-    const totalCost = processingFees + transactionFees
-    
-    return (totalCost / extractedData.totalVolume) * 100
+    if (!extractedData || !extractedData.totalVolume) return 0
+    return (extractedData.totalFees / extractedData.totalVolume) * 100
   }
 
   // Computed current cost (sum of processing fees + transaction fees)
@@ -701,7 +703,7 @@ export default function ProcessingCalculator() {
           </div>
           
           {/* Basic Info - top row (Total Volume, Processing Method, Average Ticket) */}
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
             <div className="bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-700 dark:to-slate-800 p-6 rounded-xl border border-gray-200 dark:border-slate-600">
               <p className="text-sm font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider">Total Volume</p>
               <p className="text-3xl font-bold text-gray-900 dark:text-white mt-2">
@@ -729,18 +731,28 @@ export default function ProcessingCalculator() {
                 {extractedData.transactionCount ? `${extractedData.transactionCount} txns` : 'transactions unknown'}
               </p>
             </div>
+            {extractedData.totalInterchange > 0 && (
+              <div className="bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-900/30 dark:to-orange-800/30 p-6 rounded-xl border border-orange-200 dark:border-orange-700">
+                <p className="text-sm font-semibold text-orange-700 dark:text-orange-300 uppercase tracking-wider">Interchange Cost</p>
+                <p className="text-3xl font-bold text-orange-600 dark:text-orange-400 mt-2">
+                  {formatCurrency(extractedData.totalInterchange)}
+                </p>
+                <p className="text-xs text-orange-600 dark:text-orange-400 mt-2 font-medium">
+                  {((extractedData.totalInterchange / extractedData.totalVolume) * 100).toFixed(2)}% of volume
+                </p>
+              </div>
+            )}
           </div>
 
-          {/* Metrics row: Current Spend, True Effective Rate, Processing Rate, Per Transaction */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+          {/* Metrics row — always: Current Spend + True Effective Rate; then method-specific cards */}
+          <div className={`grid grid-cols-1 ${extractedData.currentProcessingMethod === 'Tiered Pricing' ? 'md:grid-cols-2' : 'md:grid-cols-4'} gap-6 mb-8`}>
+            {/* Always shown */}
             <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/30 p-6 rounded-xl border border-blue-200 dark:border-blue-700">
               <p className="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider">Current Spend</p>
               <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-2">
-                {formatCurrency(computedCurrentCost)}
+                {formatCurrency(extractedData.totalFees)}
               </p>
-              <p className="text-xs text-blue-600 dark:text-blue-400 mt-2 font-medium">
-                this month
-              </p>
+              <p className="text-xs text-blue-600 dark:text-blue-400 mt-2 font-medium">this month</p>
             </div>
             <div className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-900/30 dark:to-red-800/30 p-6 rounded-xl border border-red-200 dark:border-red-700">
               <p className="text-sm font-semibold text-red-700 dark:text-red-300 uppercase tracking-wider">True Effective Rate</p>
@@ -748,27 +760,83 @@ export default function ProcessingCalculator() {
                 {calculateEffectiveRate().toFixed(2)}%
               </p>
               <p className="text-xs text-red-600 dark:text-red-400 mt-2 font-medium">
-                {formatCurrency(calculateProcessingFeesDollars() + calculateTransactionFeesDollars())} total
+                all fees / volume
               </p>
             </div>
-            <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
-              <p className="text-sm font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider">Processing Rate</p>
-              <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">
-                {calculateProcessingRate().toFixed(2)}%
-              </p>
-              <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
-                {formatCurrency(calculateProcessingFeesDollars())} spent
-              </p>
-            </div>
-            <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
-              <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Per Transaction</p>
-              <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
-                {formatCurrency(calculateWeightedPerTransactionRate())}
-              </p>
-              <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">
-                {formatCurrency(calculateTransactionFeesDollars())} total
-              </p>
-            </div>
+
+            {/* Interchange Plus: Processor Markup (bps) + Per Auth Fee */}
+            {extractedData.currentProcessingMethod === 'Interchange Plus' && (
+              <>
+                <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
+                  <p className="text-sm font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider">Processor Markup</p>
+                  {extractedData.processorMarkupRate ? (
+                    <>
+                      <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">
+                        {Math.round(extractedData.processorMarkupRate * 10000)} bps
+                      </p>
+                      <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
+                        {(extractedData.processorMarkupRate * 100).toFixed(2)}% above interchange
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">—</p>
+                  )}
+                </div>
+                <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
+                  <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Per Transaction Fees</p>
+                  {(extractedData.interchangePerTxnFee || extractedData.processorPerAuthFee) ? (
+                    <>
+                      <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
+                        {formatCurrency((extractedData.interchangePerTxnFee ?? 0) + (extractedData.processorPerAuthFee ?? 0))}
+                      </p>
+                      <div className="mt-2 space-y-0.5">
+                        {extractedData.interchangePerTxnFee ? (
+                          <p className="text-xs text-green-600 dark:text-green-400 font-medium">
+                            {formatCurrency(extractedData.interchangePerTxnFee)} interchange
+                          </p>
+                        ) : null}
+                        {extractedData.processorPerAuthFee ? (
+                          <p className="text-xs text-green-600 dark:text-green-400 font-medium">
+                            + {formatCurrency(extractedData.processorPerAuthFee)} processor
+                          </p>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
+                        {formatCurrency(extractedData.perTransactionRate)}
+                      </p>
+                      <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">per transaction</p>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* Flat / Dual Pricing: Rate % + Per Transaction Fee */}
+            {(extractedData.currentProcessingMethod === 'Flat Rate' || extractedData.currentProcessingMethod === 'Dual Pricing') && (
+              <>
+                <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
+                  <p className="text-sm font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider">Rate</p>
+                  <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">
+                    {calculateProcessingRate().toFixed(2)}%
+                  </p>
+                  <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
+                    {formatCurrency(calculateProcessingFeesDollars())} spent
+                  </p>
+                </div>
+                <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
+                  <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Per Transaction</p>
+                  <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
+                    {formatCurrency(extractedData.perTransactionRate)}
+                  </p>
+                  <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">per transaction</p>
+                </div>
+              </>
+            )}
+
+            {/* Tiered: no extra cards — card breakdown carries the detail */}
           </div>
 
           {/* Card Breakdown */}
@@ -789,40 +857,60 @@ export default function ProcessingCalculator() {
                       <p className="text-xs text-gray-600 dark:text-gray-400 font-medium mt-1">
                         {((data.volume / extractedData.totalVolume) * 100).toFixed(1)}% of volume
                       </p>
+                      {data.transactionCount ? (
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{data.transactionCount} txns</p>
+                      ) : null}
                     </div>
-                    <div className="pt-3">
-                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Avg Ticket</p>
-                      <p className="text-lg font-bold text-yellow-600 dark:text-yellow-400 mt-1">{formatCurrency(data.averageTicketSize ?? 0)}</p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{data.transactionCount ? `${data.transactionCount} txns` : ''}</p>
-                    </div>
+
+                    {/* Rate — shown for all methods */}
                     <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
-                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Rate</p>
+                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">
+                        {extractedData.currentProcessingMethod === 'Interchange Plus' ? 'Effective Interchange Rate' : 'Rate'}
+                      </p>
                       <div className="flex items-baseline justify-between mt-1">
                         <p className="text-lg font-bold text-blue-600 dark:text-blue-400">
                           {(data.rate * 100).toFixed(2)}%
                         </p>
-                        <p className="text-sm text-blue-600 dark:text-blue-400 font-medium">
-                          {formatCurrency(calculateCardRateBasedFees(data))}
-                        </p>
+                        {extractedData.currentProcessingMethod !== 'Tiered Pricing' && (
+                          <p className="text-sm text-blue-600 dark:text-blue-400 font-medium">
+                            {formatCurrency(calculateCardRateBasedFees(data))}
+                          </p>
+                        )}
                       </div>
                     </div>
+
+                    {/* Per Transaction — shown for all methods */}
                     <div>
                       <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Per Transaction</p>
                       <div className="flex items-baseline justify-between mt-1">
                         <p className="text-lg font-bold text-green-600 dark:text-green-400">
                           {formatCurrency(data.perTransactionFee)}
                         </p>
-                        <p className="text-sm text-green-600 dark:text-green-400 font-medium">
-                          {formatCurrency(calculateCardTransactionBasedFees(data))}
-                        </p>
+                        {extractedData.currentProcessingMethod !== 'Tiered Pricing' && (
+                          <p className="text-sm text-green-600 dark:text-green-400 font-medium">
+                            {formatCurrency(calculateCardTransactionBasedFees(data))}
+                          </p>
+                        )}
                       </div>
                     </div>
-                    <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
-                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Total Fees</p>
-                      <p className="text-lg font-bold text-orange-600 dark:text-orange-400 mt-1">
-                        {formatCurrency(calculateCardFees(data))}
-                      </p>
-                    </div>
+
+                    {/* Avg Ticket + Total Fees — only for non-tiered */}
+                    {extractedData.currentProcessingMethod !== 'Tiered Pricing' && (
+                      <>
+                        {data.averageTicketSize ? (
+                          <div>
+                            <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Avg Ticket</p>
+                            <p className="text-lg font-bold text-yellow-600 dark:text-yellow-400 mt-1">{formatCurrency(data.averageTicketSize)}</p>
+                          </div>
+                        ) : null}
+                        <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
+                          <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Total Fees</p>
+                          <p className="text-lg font-bold text-orange-600 dark:text-orange-400 mt-1">
+                            {formatCurrency(calculateCardFees(data))}
+                          </p>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -832,15 +920,31 @@ export default function ProcessingCalculator() {
       )}
       {extractedData && (
         <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-lg p-8 border border-gray-200 dark:border-slate-700">
-          <div className="mb-6">
-            <h2 className="text-3xl font-bold text-gray-900 dark:text-white">
-              📈 New Rate Analysis
-            </h2>
-            {accountName && (
-              <p className="text-gray-600 dark:text-gray-400 mt-2 text-lg">
-                <span className="font-semibold text-blue-600 dark:text-blue-400">{accountName}</span>
-              </p>
-            )}
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-3xl font-bold text-gray-900 dark:text-white">
+                📈 New Rate Analysis
+              </h2>
+              {accountName && (
+                <p className="text-gray-600 dark:text-gray-400 mt-2 text-lg">
+                  <span className="font-semibold text-blue-600 dark:text-blue-400">{accountName}</span>
+                </p>
+              )}
+            </div>
+            {/* Customer mode toggle */}
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                {showProfit ? 'Internal View' : 'Customer View'}
+              </span>
+              <button
+                onClick={() => setShowProfit(!showProfit)}
+                className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-200 focus:outline-none ${showProfit ? 'bg-blue-600' : 'bg-gray-300 dark:bg-slate-600'}`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform duration-200 ${showProfit ? 'translate-x-8' : 'translate-x-1'}`}
+                />
+              </button>
+            </div>
           </div>
           
           <div className="mb-8">
@@ -1035,11 +1139,16 @@ export default function ProcessingCalculator() {
             const newCosts = calculateNewCosts()
             if (!newCosts) return null
             
-            const currentCost = computedCurrentCost
+            const currentCost = extractedData.totalFees
             const monthlySavings = currentCost - newCosts.totalCost
             const annualSavings = monthlySavings * 12
             const monthlyProfit = newCosts.profit
             const annualProfit = monthlyProfit * 12
+            const monthlyResidual = (annualProfit * 0.15) / 12
+            // Use actual interchange from statement, fall back to estimate only if unavailable
+            const actualInterchange = extractedData.totalInterchange > 0
+              ? extractedData.totalInterchange
+              : newCosts.estimatedInterchange
             
             return (
               <div className="mt-10 pt-8 border-t-2 border-gray-300 dark:border-slate-600">
@@ -1048,46 +1157,60 @@ export default function ProcessingCalculator() {
                 </h3>
                 
                 {/* Main Metrics */}
-                <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                <div className={`grid md:grid-cols-2 ${showProfit ? 'lg:grid-cols-2 xl:grid-cols-5' : 'lg:grid-cols-2'} gap-6 mb-8`}>
                   <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/30 p-6 rounded-xl border border-blue-200 dark:border-blue-700">
                     <p className="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider">New Monthly Cost</p>
                     <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-2">
                       {formatCurrency(newCosts.totalCost)}
                     </p>
                     <p className="text-xs text-blue-600 dark:text-blue-400 mt-2 font-medium">
-                      {newCosts.effectiveRate.toFixed(2)}% effective rate
+                      vs {formatCurrency(currentCost)} current
+                    </p>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-teal-50 to-teal-100 dark:from-teal-900/30 dark:to-teal-800/30 p-6 rounded-xl border border-teal-200 dark:border-teal-700">
+                    <p className="text-sm font-semibold text-teal-700 dark:text-teal-300 uppercase tracking-wider">New Effective Rate</p>
+                    <p className="text-3xl font-bold text-teal-600 dark:text-teal-400 mt-2">
+                      {newCosts.effectiveRate.toFixed(2)}%
+                    </p>
+                    <p className="text-xs text-teal-600 dark:text-teal-400 mt-2 font-medium">
+                      vs {calculateEffectiveRate().toFixed(2)}% current
                     </p>
                   </div>
                   
-                  <div className="bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-900/30 dark:to-orange-800/30 p-6 rounded-xl border border-orange-200 dark:border-orange-700">
-                    <p className="text-sm font-semibold text-orange-700 dark:text-orange-300 uppercase tracking-wider">Estimated Interchange</p>
-                    <p className="text-3xl font-bold text-orange-600 dark:text-orange-400 mt-2">
-                      {formatCurrency(newCosts.estimatedInterchange)}
-                    </p>
-                    <p className="text-xs text-orange-600 dark:text-orange-400 mt-2 font-medium">
-                      paid to banks/networks
-                    </p>
-                  </div>
-                  
-                  <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
-                    <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Monthly Profit</p>
-                    <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
-                      {formatCurrency(monthlyProfit)}
-                    </p>
-                    <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">
-                      your earnings
-                    </p>
-                  </div>
-                  
-                  <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
-                    <p className="text-sm font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider">Annual Profit</p>
-                    <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">
-                      {formatCurrency(annualProfit)}
-                    </p>
-                    <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
-                      ARR projection
-                    </p>
-                  </div>
+                  {showProfit && (
+                    <>
+                      <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
+                        <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Monthly Profit</p>
+                        <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
+                          {formatCurrency(monthlyProfit)}
+                        </p>
+                        <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">
+                          your earnings
+                        </p>
+                      </div>
+                      
+                      <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
+                        <p className="text-sm font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider">Annual Profit</p>
+                        <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">
+                          {formatCurrency(annualProfit)}
+                        </p>
+                        <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
+                          ARR projection
+                        </p>
+                      </div>
+
+                      <div className="bg-gradient-to-br from-yellow-50 to-yellow-100 dark:from-yellow-900/30 dark:to-yellow-800/30 p-6 rounded-xl border border-yellow-200 dark:border-yellow-700">
+                        <p className="text-sm font-semibold text-yellow-700 dark:text-yellow-300 uppercase tracking-wider">Monthly Residual</p>
+                        <p className="text-3xl font-bold text-yellow-600 dark:text-yellow-400 mt-2">
+                          {formatCurrency(monthlyResidual)}
+                        </p>
+                        <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-2 font-medium">
+                          15% of annual profit ÷ 12
+                        </p>
+                      </div>
+                    </>
+                  )}
                 </div>
                 
                 {/* Merchant Savings Info */}
