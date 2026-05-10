@@ -12,114 +12,191 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 })
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
+    const model = genAI.getGenerativeModel(
+      { model: 'gemini-2.5-flash' },
+      { apiVersion: 'v1beta' }
+    )
     
-    const prompt = `Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response.
+    const prompt = `You are an expert payment processing analyst. Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response.
 
-FIRST: Detect the statement format:
-- "card_split" format: Each card network (Visa, Mastercard, Amex, Discover) has separate rows with their own rates
-- "bundled_with_amex" format: Visa/Mastercard/Discover are bundled together with one "Swipe" and "Keyed" row, and Amex has separate rows
-- "other": Any other structure
+CRITICAL MINDSET: Processing statements are layered financial documents. Processors intentionally use vague terminology, overlapping categories, and inconsistent naming conventions. NEVER trust labels at face value — classify fees semantically, infer relationships mathematically, and compare totals against expected industry behavior.
 
-SECOND: Detect the processing method - look for these specific indicators:
-- "Interchange Plus": Look for ANY of these signals:
-  * A section titled "Interchange Charges/Program Fees" or "Interchange Detail" listing individual interchange categories (e.g., "VI-CPS/RESTAURANT", "MC-WORLD ELITE", "DSCVR PSL REST CP")
-  * Lines showing "DISC RATE TIMES" or "Sales Discount" as a percentage of volume alongside separate interchange category line items
-  * Fees labeled as "Interchange charges" (the base) AND separate "Service charges" (the markup)
-  * Processor names commonly on I+: BASYS, Heartland, First Data, TSYS, Worldpay, Elavon, Gravity
-- "Tiered Pricing": Look for MULTIPLE DIFFERENT rate levels. Check for:
-  * Different rates for different card tier categories: "Check Card", "Qualified", "Mid-Qualified", "Non-Qualified"
-  * OR different rates for different card networks: Visa, Mastercard, Amex, Discover each have unique percentages
-- "Flat Rate": All cards are charged at ONE single percentage rate
-- "Dual Pricing": Shows "Cash Discount" or shows two pricing tiers (one rate, one surcharge)
+There are three conceptual layers in every statement:
+  Layer 1 — True Card Costs: Interchange + Assessments (paid to card networks and issuing banks)
+  Layer 2 — Processor Markup: The processor's own revenue added on top
+  Layer 3 — Fixed / Ancillary Fees: Monthly/per-item fees charged by the processor
 
-=== INTERCHANGE PLUS STATEMENTS - SPECIAL EXTRACTION RULES ===
-If the statement is Interchange Plus, follow these specific rules:
+══════════════════════════════════════════
+STEP 1 — LOCATE TOTALS
+══════════════════════════════════════════
+Find from the statement:
+  - totalVolume: total processing volume (sum all pages)
+  - totalFees: total ALL fees charged (everything — interchange + markup + fixed)
+  - transactionCount: exact count from the statement (do not estimate unless unavailable)
+  - averageTicketSize: average sale amount in dollars
 
-1. FINDING totalInterchange:
-   - Look for a fee SUMMARY section (usually near the bottom of the fees section) that shows a line explicitly labeled "Total Interchange Charges/Program Fees" or similar.
+Effective Rate = totalFees / totalVolume  (the merchant's true blended cost)
+
+══════════════════════════════════════════
+STEP 2 — DETECT PRICING MODEL
+══════════════════════════════════════════
+Classify as one of:
+  "Interchange Plus" — Signals:
+    * Section titled "Interchange Charges/Program Fees" or "Interchange Detail" with individual interchange categories (e.g., VI-CPS/RESTAURANT, MC-WORLD ELITE, DSCVR PSL REST CP)
+    * Lines showing "DISC RATE TIMES" or "Sales Discount" as a percentage of volume alongside interchange category line items
+    * Fees labeled "Interchange charges" (base) AND separate "Service charges" (markup)
+    * Processors commonly on I+: BASYS, Heartland, First Data, TSYS, Worldpay, Elavon, Gravity
+
+  "Tiered Pricing" — Signals:
+    * Multiple rate tiers: Qualified / Mid-Qualified / Non-Qualified
+    * OR separate unique percentages per card network (Visa at X%, Mastercard at Y%, Amex at Z%)
+    * Little or no interchange detail visible
+
+  "Flat Rate" — Signal:
+    * Single blended percentage for all cards, no interchange detail
+
+  "Dual Pricing" — Signals:
+    * "Cash Discount" language or dual pricing tiers (one rate, one surcharge)
+    * Customer fee adjustments
+
+  "Unknown" — if none of the above can be determined
+
+══════════════════════════════════════════
+STEP 3 — SEPARATE CARD COSTS FROM PROCESSOR REVENUE
+══════════════════════════════════════════
+Classify every fee line into two buckets. IMPORTANT: Do not assume section headers are truthful — classify each line item individually based on its semantic meaning.
+
+A. Card Brand / Interchange Costs (Layer 1 — pass-through to card networks / issuing banks):
+   Labels that indicate true card costs (mostly unavoidable):
+   Interchange Charges, Program Fees, Assessments, NABU, APF, FANF,
+   Visa Acquirer Processing Fee, Mastercard Network Access, Discover Data Usage,
+   Amex Discount, Card Brand Fees, Debit Network Fees, Network Access Fee (when it is a
+   direct pass-through of the card brand's own network access charge)
+
+B. Processor Revenue / Markup (Layer 2 + 3 — processor profit and operational charges):
+   Labels that indicate processor-added fees:
+   Service Charges, Discount Rate, Transaction Fee, Authorization Fee, Auth Fee,
+   Batch Fee, PCI Fee, Statement Fee, Gateway Fee, Monthly Minimum, Non-Qualified Surcharge,
+   Access Fee, Platform Fee, Admin Fee, Compliance Fee, Sales Discount (when it represents
+   the processor's markup percentage applied to volume)
+
+   NOTE: Processors frequently hide margin inside fees that sound like pass-through costs.
+   If a "Network Access Fee" or similar appears inflated or inconsistent with standard
+   card brand pricing, flag it as suspected hidden markup.
+
+totalInterchange = sum of Layer 1 fees
+Processor Revenue = totalFees − totalInterchange
+
+══════════════════════════════════════════
+STEP 4 — INTERCHANGE PLUS: DETAILED EXTRACTION
+══════════════════════════════════════════
+If the pricing model is Interchange Plus, follow these specific rules:
+
+4a. FINDING totalInterchange:
+   - Look for a fee SUMMARY section that shows a line explicitly labeled "Total Interchange Charges/Program Fees" or similar.
    - Use THAT labeled total — do NOT use the grand total of the interchange detail table (they may differ because debit network fees are sometimes listed separately).
-   - Also include "Total Debit Network Fees" in totalInterchange if it appears as a separate line in the fee summary, as these ARE true interchange/network costs.
-   - Example: if fee summary shows "Total Interchange Charges/Program Fees: $2,716.99", use $2,716.99.
+   - Also include "Total Debit Network Fees" in totalInterchange if it appears as a separate line in the fee summary — these ARE true network costs.
+   - Example: "Total Interchange Charges/Program Fees: $2,716.99" → use $2,716.99.
 
-2. FINDING the PROCESSOR MARKUP (the "+" in Interchange Plus):
-   - Look for lines like "SALES DISCOUNT 0.0028 DISC RATE TIMES $120,000" — the 0.0028 is the processor's markup rate (0.28%).
+4b. FINDING the PROCESSOR MARKUP RATE (the "+" in Interchange Plus):
+   - Look for lines like "SALES DISCOUNT 0.0028 DISC RATE TIMES $120,000" — the 0.0028 is the markup rate (0.28%).
    - Look for separate debit vs. credit discount lines (e.g., "DEBIT SALES DISCOUNT 0.0028 DISC RATE TIMES...").
    - These are labeled as "Service charges" in the fee type column.
    - Also look for per-authorization fees: "WATS AUTH FEE X TRANSACTIONS AT $0.09", "NETWORK ACCESS AUTH FEE X TRANSACTIONS AT $0.0295".
-   - Report the processor markup rate as "processorMarkupRate" (e.g., 0.0028) and per-auth fee as "processorPerAuthFee" (e.g., 0.09).
+   - Report as "processorMarkupRate" (e.g., 0.0028) and "processorPerAuthFee" (e.g., 0.09).
 
-2b. FINDING the INTERCHANGE PER-TRANSACTION FEE (separate from processor per-auth):
-   - Each interchange category in the Interchange Detail section has a rate structure like "1.54% + $0.10" or "2.20% + $0.10".
-   - The "+ $0.10" (or similar ¢ amount) is the INTERCHANGE's own per-transaction fee charged by the card networks — this is SEPARATE from the processor's per-auth fee above.
-   - To find the blended interchange per-transaction fee: look at the individual category lines in the Interchange Detail/Charges section. Many will show a rate like "VISA CPS RESTAURANT 1.54% $0.10" or a column labeled "Per Item" or "Per Txn" next to each category.
-   - Compute the weighted average: sum(per_txn_fee_for_category × transactions_in_category) / total_transactions. If you cannot get per-category transaction counts, use a simple average of the per-transaction fees you see across categories.
-   - Report this as "interchangePerTxnFee" (e.g., 0.08 for 8 cents). If you cannot find individual category per-transaction fees, set to 0.
+4c. FINDING the INTERCHANGE PER-TRANSACTION FEE (separate from processor per-auth):
+   - Each interchange category line has a rate structure like "1.54% + $0.10" or "2.20% + $0.10".
+   - The "+ $0.10" is the INTERCHANGE's own per-transaction fee charged by the card networks — SEPARATE from the processor's per-auth fee.
+   - Compute the weighted average: sum(per_txn_fee × transactions_in_category) / total_transactions.
+     If per-category transaction counts are unavailable, use a simple average across all visible category per-txn fees.
+   - Report as "interchangePerTxnFee" (e.g., 0.08 for 8 cents). Set to 0 if not found.
 
-3. FINDING cardBreakdown for I+ statements:
+4d. FINDING cardBreakdown for I+ statements:
    - Use volumes and transaction counts from the "Summary by Card Type" section.
-   - For the "rate" per card: compute it as (total interchange charges for that card type) / (volume for that card type).
-     * Find each card type's interchange total in the "Interchange Charges/Program Fees" detail table (e.g., "MASTERCARD TOTAL", "VISA TOTAL", "DISCOVER TOTAL", "AMEX ACQ TOTAL").
-     * Divide by that card's volume from Summary by Card Type.
-     * Example: if Visa interchange = $1,082 and Visa volume = $59,214 → rate = 1082/59214 = 0.01828
-   - For debit cards: their interchange shows $0 in the credit interchange table, but debit NETWORK FEES are charged separately. Compute debit effective rate as (Total Debit Network Fees) / (debit volume).
-   - Include "transactionCount" per card type from Summary by Card Type.
-   - Use the "Average Ticket" column from Summary by Card Type for per-card averageTicketSize.
+   - Compute effective interchange rate per card as: interchange_for_card / volume_for_card
+     * Find each card's interchange total in the "Interchange Charges/Program Fees" detail table.
+     * Example: Visa interchange $1,082 / Visa volume $59,214 = 0.01828
+   - For debit: their interchange shows $0 in the credit table; compute debit rate as (Total Debit Network Fees) / (debit volume).
+   - Include "transactionCount" and "averageTicketSize" per card type from Summary by Card Type.
 
-4. FINDING totalTransactionCount for I+ statements:
-   - Look at the TOTAL row of "Summary by Card Type" — the "Items" or transaction count column gives the exact total.
-   - This is critical — do not estimate it.
+4e. FINDING totalTransactionCount for I+ statements:
+   - Use the TOTAL row of "Summary by Card Type" → "Items" or transaction count column.
+   - This is exact — do not estimate.
 
-=== END INTERCHANGE PLUS RULES ===
+══════════════════════════════════════════
+STEP 5 — NON-INTERCHANGE-PLUS: PER-TRANSACTION FEES
+══════════════════════════════════════════
+For Tiered, Flat Rate, or unknown statements:
+  1. Look for sections labeled "Per Transaction", "Per Txn", "Transaction Fee", "Authorization Detail"
+  2. Look for small dollar amounts next to card types (e.g., "$0.15", "$0.25", "15¢")
+  3. Search for patterns like "Visa ... $0.15", "Mastercard ... $0.10"
+  4. If unavailable, estimate as totalFees / transactionCount and set "perTransactionRateEstimated": true
 
-FINDING PER-TRANSACTION FEES (for non-I+ statements):
-Look for per-transaction fees using MULTIPLE strategies:
-1. Search for sections labeled "Per Transaction", "Per Txn", "Transaction Fee", "Authorization Detail", "Auth Detail", or "Interchange Detail"
-2. Look for SMALL DOLLAR AMOUNTS in cents next to card types (e.g., "$0.15", "$0.25", "$0.10", "$0.30", "15¢", "25¢")
-3. Search for patterns like "Visa ... $0.15", "Mastercard ... $0.10", "Amex ... $0.25", "Discover ... $0.20"
-4. Look in "Authorization Detail" or "Detail" sections
-5. If there's a "Total Fees" line and you can identify the number of transactions, calculate per-transaction fee
+══════════════════════════════════════════
+STEP 6 — IDENTIFY HIDDEN MARGIN
+══════════════════════════════════════════
+Flag any fees that appear to contain concealed processor markup in "hiddenMarginFlags": an array of strings.
+Common hiding spots:
+  - Network access fees inflated above standard card brand pricing
+  - Auth fees significantly higher than industry norm (~$0.02–$0.05 per auth for pass-through)
+  - "Sales Discount" bundled with interchange rather than broken out separately
+  - Non-qualified surcharges added on top of already-marked-up tiered rates
+  - "Program fees" or "data usage fees" with values inconsistent with card brand published schedules
+  - Any fee labeled as a pass-through but where the total does not reconcile with published card brand rates
 
-Also: extract the average ticket size (average sale amount) when present as a dollar value.
+══════════════════════════════════════════
+STEP 7 — STATEMENT FORMAT
+══════════════════════════════════════════
+Classify the layout format as:
+  "card_split": Each card network (Visa, Mastercard, Amex, Discover) has separate rows with own rates
+  "bundled_with_amex": Visa/MC/Discover bundled together; Amex has separate rows
+  "tiered": Organized by qualification tier (Qualified / Mid-Qual / Non-Qual)
+  "unknown": Cannot be determined
 
-Return this JSON:
+══════════════════════════════════════════
+RETURN THIS JSON:
+══════════════════════════════════════════
 {
-  "totalVolume": total processing volume as a number (sum from all pages),
-  "totalInterchange": total interchange fees as a number - for I+ this is the labeled "Total Interchange Charges/Program Fees" line,
-  "totalFees": total ALL fees charged as a number (sum from all pages) - everything combined,
-  "transactionCount": exact total number of transactions from the statement (not estimated),
-  "perTransactionRate": the average per-transaction fee in dollars (e.g. 0.15 for 15 cents, NOT the total),
-  "averageTicketSize": the average sale amount in dollars (e.g. 45.50),
+  "totalVolume": <number — total processing volume, sum all pages>,
+  "totalInterchange": <number — Layer 1 card brand costs only (see Step 3)>,
+  "totalFees": <number — ALL fees combined (interchange + markup + fixed)>,
+  "transactionCount": <number — exact count from statement; if unavailable estimate and set transactionCountEstimated: true>,
+  "perTransactionRate": <number — avg per-transaction fee in dollars (e.g. 0.15 for 15¢), NOT a total>,
+  "averageTicketSize": <number — average sale amount in dollars>,
   "currentProcessingMethod": "Interchange Plus" | "Flat Rate" | "Tiered Pricing" | "Dual Pricing" | "Unknown",
-  "statementFormat": "card_split" | "bundled_with_amex" | "unknown",
-  "processorMarkupRate": for I+ only - the processor's markup percentage as decimal (e.g. 0.0028 for 0.28%), or 0 if not I+,
-  "processorPerAuthFee": for I+ only - the processor's per-authorization fee in dollars (e.g. 0.09), or 0 if not I+,
-  "interchangePerTxnFee": for I+ only - the blended per-transaction fee charged by the card networks within the interchange categories (e.g. 0.08 for 8 cents). Look for the "+ $X.XX" portion of interchange category rate lines. Set to 0 if not found or not I+,
+  "statementFormat": "card_split" | "bundled_with_amex" | "tiered" | "unknown",
+  "processorMarkupRate": <number — I+ only: processor's markup as decimal (e.g. 0.0028); else 0>,
+  "processorPerAuthFee": <number — I+ only: processor's per-auth fee in dollars (e.g. 0.09); else 0>,
+  "interchangePerTxnFee": <number — I+ only: blended card-network per-txn fee in dollars (e.g. 0.08); else 0>,
+  "hiddenMarginFlags": <array of strings — fees suspected to contain hidden processor markup>,
   "cardBreakdown": {
-    "key1": { "volume": number, "rate": number (as decimal), "perTransactionFee": number, "transactionCount": number, "averageTicketSize": number },
-    "key2": { ... }
+    "<key>": {
+      "volume": <number>,
+      "rate": <number — as decimal>,
+      "perTransactionFee": <number>,
+      "transactionCount": <number>,
+      "averageTicketSize": <number>
+    }
   }
 }
 
-For cardBreakdown keys:
-- If card_split or I+ format: use keys "visa", "mastercard", "amex", "discover", "debit" (include only card types that appear)
-- If bundled_with_amex format: use keys like "visa_mastercard_discover", "amex", "amex_keyed" (if separate keyed line)
-- For tiered pricing: create entries for each tier (e.g., "check_card", "qualified", "mid_qualified", "non_qualified")
-- If fees differ by Swipe vs Keyed, create separate entries (e.g., "visa_swipe", "visa_keyed")
+cardBreakdown key conventions:
+  - I+ or card_split: "visa", "mastercard", "amex", "discover", "debit"
+  - bundled_with_amex: "visa_mastercard_discover", "amex", "amex_keyed"
+  - tiered: "check_card", "qualified", "mid_qualified", "non_qualified"
+  - Swipe vs Keyed differences: "visa_swipe", "visa_keyed", etc.
+  - Only include card types that actually appear in the statement
 
-IMPORTANT:
-- Sum all volumes and fees from all pages
-- For I+: totalInterchange = "Total Interchange Charges/Program Fees" labeled value (includes debit network fees if listed there)
-- For non-I+: totalInterchange = ONLY the base interchange line item, NOT including processor markup
-- totalFees should include EVERYTHING (interchange + processor markup + transaction fees + all other charges)
-- transactionCount: extract the actual number from the statement. If unavailable, estimate as totalVolume / averageTicketSize and set "transactionCountEstimated": true
-- perTransactionRate MUST be a single average number representing cost per transaction in dollars (not a total, not a range)
-  * For I+: use the processor's per-auth fee (e.g., processorPerAuthFee)
-  * For non-I+: look for explicit per-transaction fee on the rate schedule
-  * If estimating: totalFees / transactionCount and set "perTransactionRateEstimated": true
-- For I+ cardBreakdown rates: compute effective rate = interchange_for_card / volume_for_card (as shown above)
-- Only return valid JSON
-- If you can't find a specific value, use 0 for numbers or "Unknown" for strings`
+IMPORTANT RULES:
+  - Sum all volumes and fees across all pages
+  - NEVER trust section labels alone — classify each line item semantically
+  - totalFees includes EVERYTHING; totalInterchange is Layer 1 only
+  - perTransactionRate is a PER-TRANSACTION average (not a total amount)
+    * For I+: use processorPerAuthFee value
+    * For non-I+: extract from rate schedule or estimate
+  - For I+ cardBreakdown rates: effective rate = interchange_for_card / volume_for_card
+  - Only return valid JSON; use 0 for unknown numbers, "Unknown" for unknown strings`
 
     // Convert all files to base64 and prepare for Gemini
     const imageParts = await Promise.all(
@@ -153,7 +230,13 @@ IMPORTANT:
 
     // Send all images to Gemini
     console.log(`Sending ${imageParts.length} file(s) to Gemini model: ${model.model}`)
-    const result = await model.generateContent([prompt, ...imageParts])
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: prompt }, ...imageParts] }],
+      generationConfig: {
+        temperature: 0,          // Fully deterministic — same input → same output
+        responseMimeType: 'application/json', // Force JSON output mode
+      }
+    })
     const response = await result.response
     const text = response.text()
     console.log('Gemini raw response length:', text.length)
@@ -174,6 +257,7 @@ IMPORTANT:
     data.processorMarkupRate = data.processorMarkupRate ?? 0
     data.processorPerAuthFee = data.processorPerAuthFee ?? 0
     data.interchangePerTxnFee = data.interchangePerTxnFee ?? 0
+    data.hiddenMarginFlags = Array.isArray(data.hiddenMarginFlags) ? data.hiddenMarginFlags : []
 
     // Normalize numeric values if strings
     const toNum = (v: any) => {

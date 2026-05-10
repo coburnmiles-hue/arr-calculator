@@ -44,6 +44,9 @@ export default function LoginPage() {
 
       // Login successful
       localStorage.setItem('authToken', data.token)
+      localStorage.setItem('username', data.username)
+      // Set a readable cookie so API routes can identify the user
+      document.cookie = `username=${data.username}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Strict`
       router.push('/')
     } catch (err) {
       setError('An error occurred. Please try again.')

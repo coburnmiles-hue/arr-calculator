@@ -21,7 +21,19 @@ export const pricingScenarios = pgTable('pricing_scenarios', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
 
+export const analyses = pgTable('analyses', {
+  id: serial('id').primaryKey(),
+  username: text('username').notNull(),
+  accountName: text('account_name').notNull(),
+  pricingModel: text('pricing_model').notNull(),
+  rates: jsonb('rates').notNull(),
+  extractedData: jsonb('extracted_data').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+})
+
 export type Statement = typeof statements.$inferSelect
 export type NewStatement = typeof statements.$inferInsert
 export type PricingScenario = typeof pricingScenarios.$inferSelect
 export type NewPricingScenario = typeof pricingScenarios.$inferInsert
+export type Analysis = typeof analyses.$inferSelect
+export type NewAnalysis = typeof analyses.$inferInsert

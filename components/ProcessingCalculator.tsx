@@ -23,6 +23,7 @@ interface ExtractedData {
   processorMarkupRate?: number
   processorPerAuthFee?: number
   interchangePerTxnFee?: number
+  hiddenMarginFlags?: string[]
 }
 
 interface SavedAnalysis {
@@ -77,27 +78,47 @@ export default function ProcessingCalculator() {
   // Customer-facing mode — hides profit figures
   const [showProfit, setShowProfit] = useState<boolean>(true)
 
-  // Load saved analyses from localStorage on mount
+  // Load saved analyses from the database on mount
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('processingArAnalyses')
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved)
-          setSavedAnalyses(parsed)
-        } catch (e) {
-          console.error('Failed to load saved analyses:', e)
+    const load = async () => {
+      try {
+        const username = localStorage.getItem('username') ?? ''
+        if (!username) {
+          console.log('No username in localStorage — skipping analyses load')
+          return
         }
+        console.log('Loading analyses for username:', username)
+        const res = await fetch('/api/analyses', {
+          headers: { 'x-username': username }
+        })
+        console.log('GET /api/analyses status:', res.status)
+        if (!res.ok) return
+        const json = await res.json()
+        console.log('Analyses response:', JSON.stringify(json).slice(0, 200))
+        if (json.analyses) {
+          // Map DB rows to SavedAnalysis shape
+          const mapped = json.analyses.map((row: any) => ({
+            id: String(row.id),
+            accountName: row.accountName ?? row.account_name,
+            timestamp: new Date(row.createdAt ?? row.created_at),
+            extractedData: row.extractedData ?? row.extracted_data,
+            pricingModel: row.pricingModel ?? row.pricing_model,
+            rates: row.rates
+          }))
+          console.log('Mapped analyses count:', mapped.length)
+          setSavedAnalyses(mapped)
+        }
+      } catch (e) {
+        console.error('Failed to load saved analyses:', e)
       }
     }
+    load()
+    // Re-run when the tab becomes visible again (e.g., after login redirect)
+    // Using visibilitychange instead of focus so file picker dialogs don't trigger this
+    const onVisible = () => { if (document.visibilityState === 'visible') load() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
   }, [])
-
-  // Save to localStorage whenever savedAnalyses changes
-  useEffect(() => {
-    if (typeof window !== 'undefined' && savedAnalyses.length > 0) {
-      localStorage.setItem('processingArAnalyses', JSON.stringify(savedAnalyses))
-    }
-  }, [savedAnalyses])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -268,8 +289,15 @@ export default function ProcessingCalculator() {
       ? extractedData.transactionCount
       : Math.round(totalVolume / avgTicketFallback)
     
-    // Calculate estimated interchange costs
+    // Calculate estimated interchange costs (fallback when statement doesn't have it)
     const interchangeEstimate = estimateInterchangeCosts(totalVolume, estimatedTransactions)
+
+    // Use actual interchange from the statement when available; fall back to estimate
+    // For flat/tiered/dual: the proposed rate is all-in, so profit = totalNewCost - interchange
+    // For I+: the proposed rate is just the markup, so profit = markup + per-txn fees
+    const actualInterchange = totalInterchange > 0
+      ? totalInterchange
+      : interchangeEstimate.totalInterchangeCost
 
     switch (selectedPricingModel) {
       case 'interchange_plus': {
@@ -305,8 +333,8 @@ export default function ProcessingCalculator() {
         return {
           totalCost: totalNewCost,
           effectiveRate: (totalNewCost / totalVolume) * 100,
-          estimatedInterchange: interchangeEstimate.totalInterchangeCost,
-          profit: totalNewCost - interchangeEstimate.totalInterchangeCost,
+          estimatedInterchange: actualInterchange,
+          profit: totalNewCost - actualInterchange,
           breakdown: {
             rateCost: rateCost,
             transactionFees: transactionFeeCost
@@ -321,8 +349,8 @@ export default function ProcessingCalculator() {
         return {
           totalCost: totalNewCost,
           effectiveRate: rate,
-          estimatedInterchange: interchangeEstimate.totalInterchangeCost,
-          profit: totalNewCost - interchangeEstimate.totalInterchangeCost,
+          estimatedInterchange: actualInterchange,
+          profit: totalNewCost - actualInterchange,
           breakdown: {
             cardRate: totalNewCost
           }
@@ -335,67 +363,69 @@ export default function ProcessingCalculator() {
         const midQualifiedRate = parseFloat(tieredMidQualifiedRate) || 0
         const nonQualifiedRate = parseFloat(tieredNonQualifiedRate) || 0
         const perTxnFee = parseFloat(tieredPerTransactionFee) || 0
-        
-        // Categorize cards into tiers - handle flexible card breakdown structure
-        // Try to extract Visa/MC volumes, or estimate if bundled
-        let visaMcVolume = 0
-        let amexVolume = 0
-        let discoverVolume = 0
-        
-        Object.entries(cardBreakdown).forEach(([cardKey, data]) => {
-          const key = cardKey.toLowerCase()
-          if (key.includes('visa') || key.includes('mastercard')) {
-            visaMcVolume += data.volume
-          } else if (key.includes('amex')) {
-            amexVolume += data.volume
-          } else if (key.includes('discover')) {
-            discoverVolume += data.volume
-          }
-        })
-        
-        // If no specific cards found, proportionally estimate from total
-        if (visaMcVolume === 0 && amexVolume === 0 && discoverVolume === 0) {
-          // Fallback: estimate typical card mix
-          visaMcVolume = totalVolume * 0.75
-          amexVolume = totalVolume * 0.15
-          discoverVolume = totalVolume * 0.10
-        }
-        
-        // Check Card: 40% of Visa/MC (debit cards)
-        const checkCardVolume = visaMcVolume * 0.40
-        // Qualified: 30% of Visa/MC (basic credit)
-        const qualifiedVolume = visaMcVolume * 0.30
-        // Mid-Qualified: 20% of Visa/MC (rewards credit)
-        const midQualifiedVolume = visaMcVolume * 0.20
-        // Non-Qualified: 10% of Visa/MC + all Amex and Discover
-        const nonQualifiedVolume = visaMcVolume * 0.10 + amexVolume + discoverVolume
-        
-        const checkCardCost = checkCardVolume * (checkCardRate / 100)
-        const qualifiedCost = qualifiedVolume * (qualifiedRate / 100)
-        const midQualifiedCost = midQualifiedVolume * (midQualifiedRate / 100)
-        const nonQualifiedCost = nonQualifiedVolume * (nonQualifiedRate / 100)
         const transactionFeeCost = perTxnFee * estimatedTransactions
-        
-        const totalNewCost = checkCardCost + qualifiedCost + midQualifiedCost + nonQualifiedCost + transactionFeeCost
-        
+
+        // Check if the breakdown already uses tier-named keys
+        const hasTierNames = Object.keys(cardBreakdown).some(k => {
+          const key = k.toLowerCase()
+          return key.includes('check_card') || key.includes('check card') ||
+            key.includes('mid_qual') || key.includes('non_qual') || key.includes('qual')
+        })
+
+        let totalNewCost = transactionFeeCost
+        const breakdownResult: Record<string, number> = { transactionFees: transactionFeeCost }
+
+        if (hasTierNames) {
+          // Use actual tier volumes directly
+          let checkCardVolume = 0, qualifiedVolume = 0, midQualifiedVolume = 0, nonQualifiedVolume = 0
+          Object.entries(cardBreakdown).forEach(([cardKey, data]) => {
+            const key = cardKey.toLowerCase()
+            if (key.includes('check_card') || key === 'debit' || key.includes('check card')) {
+              checkCardVolume += data.volume
+            } else if (key.includes('mid_qual') || key.includes('midqual') || key.includes('mid-qual')) {
+              midQualifiedVolume += data.volume
+            } else if (key.includes('non_qual') || key.includes('nonqual') || key.includes('non-qual')) {
+              nonQualifiedVolume += data.volume
+            } else if (key.includes('qual')) {
+              qualifiedVolume += data.volume
+            }
+          })
+          const checkCardCost = checkCardVolume * (checkCardRate / 100)
+          const qualifiedCost = qualifiedVolume * (qualifiedRate / 100)
+          const midQualifiedCost = midQualifiedVolume * (midQualifiedRate / 100)
+          const nonQualifiedCost = nonQualifiedVolume * (nonQualifiedRate / 100)
+          totalNewCost += checkCardCost + qualifiedCost + midQualifiedCost + nonQualifiedCost
+          breakdownResult.checkCard = checkCardCost
+          breakdownResult.qualified = qualifiedCost
+          breakdownResult.midQualified = midQualifiedCost
+          breakdownResult.nonQualified = nonQualifiedCost
+        } else {
+          // Card-type breakdown (Visa/MC/Amex/Discover or swipe/keyed style).
+          // Rank-match proposed tier rates to actual card volumes sorted by current rate.
+          // Cheapest current rate card → cheapest proposed tier rate, and so on.
+          // This ensures entering the current rates produces zero savings.
+          const proposedRatesSorted = [checkCardRate, qualifiedRate, midQualifiedRate, nonQualifiedRate]
+            .filter(r => r > 0)
+            .sort((a, b) => a - b)
+
+          const cardEntriesSorted = Object.entries(cardBreakdown)
+            .filter(([, d]) => d.volume > 0)
+            .sort((a, b) => a[1].rate - b[1].rate)
+
+          cardEntriesSorted.forEach(([key, data], i) => {
+            const rate = (proposedRatesSorted[i] ?? proposedRatesSorted[proposedRatesSorted.length - 1]) / 100
+            const cost = data.volume * rate
+            totalNewCost += cost
+            breakdownResult[key] = cost
+          })
+        }
+
         return {
           totalCost: totalNewCost,
           effectiveRate: (totalNewCost / totalVolume) * 100,
-          estimatedInterchange: interchangeEstimate.totalInterchangeCost,
-          profit: totalNewCost - interchangeEstimate.totalInterchangeCost,
-          breakdown: {
-            checkCard: checkCardCost,
-            qualified: qualifiedCost,
-            midQualified: midQualifiedCost,
-            nonQualified: nonQualifiedCost,
-            transactionFees: transactionFeeCost
-          },
-          tierVolumes: {
-            checkCardVolume,
-            qualifiedVolume,
-            midQualifiedVolume,
-            nonQualifiedVolume
-          }
+          estimatedInterchange: actualInterchange,
+          profit: totalNewCost - actualInterchange,
+          breakdown: breakdownResult
         }
       }
 
@@ -505,34 +535,63 @@ export default function ProcessingCalculator() {
   }
 
   // Save current analysis
-  const saveAnalysis = () => {
+  const saveAnalysis = async () => {
     if (!extractedData || !accountName.trim()) {
       alert('Please enter an account name and analyze a statement first.')
       return
     }
 
-    const newAnalysis: SavedAnalysis = {
-      id: Date.now().toString(),
-      accountName: accountName.trim(),
-      timestamp: new Date(),
-      extractedData,
-      pricingModel: selectedPricingModel,
-      rates: {
-        tieredCheckCardRate,
-        tieredQualifiedRate,
-        tieredMidQualifiedRate,
-        tieredNonQualifiedRate,
-        tieredPerTransactionFee,
-        flatRate,
-        flatPerTransactionFee,
-        dualPricingRate,
-        interchangePlusMarkup,
-        interchangePlusPerTransactionFee
-      }
+    const rates = {
+      tieredCheckCardRate,
+      tieredQualifiedRate,
+      tieredMidQualifiedRate,
+      tieredNonQualifiedRate,
+      tieredPerTransactionFee,
+      flatRate,
+      flatPerTransactionFee,
+      dualPricingRate,
+      interchangePlusMarkup,
+      interchangePlusPerTransactionFee
     }
 
-    setSavedAnalyses([newAnalysis, ...savedAnalyses])
-    alert(`Analysis saved for ${accountName}!`)
+    try {
+      const username = localStorage.getItem('username') ?? ''
+      const res = await fetch('/api/analyses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(username ? { 'x-username': username } : {})
+        },
+        body: JSON.stringify({
+          accountName: accountName.trim(),
+          pricingModel: selectedPricingModel,
+          rates,
+          extractedData
+        })
+      })
+
+      if (!res.ok) {
+        const err = await res.json()
+        alert(`Failed to save: ${err.error}`)
+        return
+      }
+
+      const json = await res.json()
+      const row = json.analysis
+      const newAnalysis: SavedAnalysis = {
+        id: String(row.id),
+        accountName: row.accountName ?? row.account_name,
+        timestamp: new Date(row.createdAt ?? row.created_at),
+        extractedData,
+        pricingModel: selectedPricingModel,
+        rates
+      }
+      setSavedAnalyses([newAnalysis, ...savedAnalyses])
+      alert(`Analysis saved for ${accountName}!`)
+    } catch (e) {
+      console.error('Save failed:', e)
+      alert('Failed to save analysis. Please try again.')
+    }
   }
 
   // Load a saved analysis
@@ -554,9 +613,22 @@ export default function ProcessingCalculator() {
   }
 
   // Delete a saved analysis
-  const deleteAnalysis = (id: string) => {
-    if (confirm('Are you sure you want to delete this analysis?')) {
+  const deleteAnalysis = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this analysis?')) return
+    try {
+      const username = localStorage.getItem('username') ?? ''
+      const res = await fetch(`/api/analyses/${id}`, {
+        method: 'DELETE',
+        headers: username ? { 'x-username': username } : {}
+      })
+      if (!res.ok) {
+        alert('Failed to delete analysis.')
+        return
+      }
       setSavedAnalyses(savedAnalyses.filter(a => a.id !== id))
+    } catch (e) {
+      console.error('Delete failed:', e)
+      alert('Failed to delete analysis.')
     }
   }
 
@@ -622,8 +694,8 @@ export default function ProcessingCalculator() {
                       {new Date(analysis.timestamp).toLocaleDateString()} • {new Date(analysis.timestamp).toLocaleTimeString()}
                     </p>
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                      💰 {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact' }).format(analysis.extractedData.totalVolume)} | 
-                      📊 {analysis.pricingModel.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                      {analysis.extractedData?.totalVolume ? `💰 ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact' }).format(analysis.extractedData.totalVolume)} | ` : ''}
+                      📊 {analysis.pricingModel.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                     </p>
                   </div>
                   <div className="flex gap-2">
@@ -702,218 +774,200 @@ export default function ProcessingCalculator() {
             )}
           </div>
           
-          {/* Basic Info - top row (Total Volume, Processing Method, Average Ticket) */}
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-            <div className="bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-700 dark:to-slate-800 p-6 rounded-xl border border-gray-200 dark:border-slate-600">
-              <p className="text-sm font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider">Total Volume</p>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white mt-2">
-                {formatCurrency(extractedData.totalVolume)}
-              </p>
-            </div>
-            <div className="bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-700 dark:to-slate-800 p-6 rounded-xl border border-gray-200 dark:border-slate-600">
-              <p className="text-sm font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider">Processing Method</p>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white mt-2">
-                {extractedData.currentProcessingMethod}
-              </p>
-            </div>
-            <div className="bg-gradient-to-br from-yellow-50 to-yellow-100 dark:from-yellow-900/30 dark:to-yellow-800/30 p-6 rounded-xl border border-yellow-200 dark:border-yellow-700">
-              <p className="text-sm font-semibold text-yellow-700 dark:text-yellow-300 uppercase tracking-wider">Average Ticket</p>
-              <p className="text-3xl font-bold text-yellow-600 dark:text-yellow-400 mt-2">
-                {formatCurrency(
-                  extractedData.averageTicketSize && extractedData.averageTicketSize > 0
-                    ? extractedData.averageTicketSize
-                    : (extractedData.transactionCount && extractedData.transactionCount > 0)
-                      ? (extractedData.totalVolume / extractedData.transactionCount)
-                      : 0
-                )}
-              </p>
-              <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-2 font-medium">
-                {extractedData.transactionCount ? `${extractedData.transactionCount} txns` : 'transactions unknown'}
-              </p>
-            </div>
-            {extractedData.totalInterchange > 0 && (
-              <div className="bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-900/30 dark:to-orange-800/30 p-6 rounded-xl border border-orange-200 dark:border-orange-700">
-                <p className="text-sm font-semibold text-orange-700 dark:text-orange-300 uppercase tracking-wider">Interchange Cost</p>
-                <p className="text-3xl font-bold text-orange-600 dark:text-orange-400 mt-2">
-                  {formatCurrency(extractedData.totalInterchange)}
-                </p>
-                <p className="text-xs text-orange-600 dark:text-orange-400 mt-2 font-medium">
-                  {((extractedData.totalInterchange / extractedData.totalVolume) * 100).toFixed(2)}% of volume
-                </p>
+          {/* ── KEYNOTES ────────────────────────────────────── */}
+          <div className="mb-8">
+            <h3 className="text-sm font-bold uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-4">Keynotes</h3>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+              <div className="bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-700 dark:to-slate-800 p-5 rounded-xl border border-gray-200 dark:border-slate-600">
+                <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Processing Method</p>
+                <p className="text-base font-bold text-gray-900 dark:text-white leading-tight">{extractedData.currentProcessingMethod}</p>
               </div>
-            )}
+              <div className="bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-700 dark:to-slate-800 p-5 rounded-xl border border-gray-200 dark:border-slate-600">
+                <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Total Processed</p>
+                <p className="text-xl font-bold text-gray-900 dark:text-white">{formatCurrency(extractedData.totalVolume)}</p>
+              </div>
+              <div className="bg-gradient-to-br from-yellow-50 to-yellow-100 dark:from-yellow-900/30 dark:to-yellow-800/30 p-5 rounded-xl border border-yellow-200 dark:border-yellow-700">
+                <p className="text-xs font-semibold text-yellow-700 dark:text-yellow-300 uppercase tracking-wider mb-2">Avg Ticket</p>
+                <p className="text-xl font-bold text-yellow-600 dark:text-yellow-400">
+                  {formatCurrency(
+                    extractedData.averageTicketSize && extractedData.averageTicketSize > 0
+                      ? extractedData.averageTicketSize
+                      : (extractedData.transactionCount && extractedData.transactionCount > 0
+                          ? extractedData.totalVolume / extractedData.transactionCount : 0)
+                  )}
+                </p>
+                {extractedData.transactionCount ? (
+                  <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">{extractedData.transactionCount.toLocaleString()} txns</p>
+                ) : null}
+              </div>
+              <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/30 p-5 rounded-xl border border-blue-200 dark:border-blue-700">
+                <p className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider mb-2">Total Spend</p>
+                <p className="text-xl font-bold text-blue-600 dark:text-blue-400">{formatCurrency(extractedData.totalFees)}</p>
+                <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">all fees + interchange</p>
+              </div>
+              <div className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-900/30 dark:to-red-800/30 p-5 rounded-xl border border-red-200 dark:border-red-700">
+                <p className="text-xs font-semibold text-red-700 dark:text-red-300 uppercase tracking-wider mb-2">Effective Rate</p>
+                <p className="text-xl font-bold text-red-600 dark:text-red-400">{calculateEffectiveRate().toFixed(2)}%</p>
+                <p className="text-xs text-red-600 dark:text-red-400 mt-1">all-in rate</p>
+              </div>
+            </div>
           </div>
 
-          {/* Metrics row — always: Current Spend + True Effective Rate; then method-specific cards */}
-          <div className={`grid grid-cols-1 ${extractedData.currentProcessingMethod === 'Tiered Pricing' ? 'md:grid-cols-2' : 'md:grid-cols-4'} gap-6 mb-8`}>
-            {/* Always shown */}
-            <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/30 p-6 rounded-xl border border-blue-200 dark:border-blue-700">
-              <p className="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider">Current Spend</p>
-              <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-2">
-                {formatCurrency(extractedData.totalFees)}
-              </p>
-              <p className="text-xs text-blue-600 dark:text-blue-400 mt-2 font-medium">this month</p>
-            </div>
-            <div className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-900/30 dark:to-red-800/30 p-6 rounded-xl border border-red-200 dark:border-red-700">
-              <p className="text-sm font-semibold text-red-700 dark:text-red-300 uppercase tracking-wider">True Effective Rate</p>
-              <p className="text-3xl font-bold text-red-600 dark:text-red-400 mt-2">
-                {calculateEffectiveRate().toFixed(2)}%
-              </p>
-              <p className="text-xs text-red-600 dark:text-red-400 mt-2 font-medium">
-                all fees / volume
-              </p>
-            </div>
-
-            {/* Interchange Plus: Processor Markup (bps) + Per Auth Fee */}
-            {extractedData.currentProcessingMethod === 'Interchange Plus' && (
-              <>
-                <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
-                  <p className="text-sm font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider">Processor Markup</p>
-                  {extractedData.processorMarkupRate ? (
-                    <>
-                      <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">
-                        {Math.round(extractedData.processorMarkupRate * 10000)} bps
-                      </p>
-                      <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
-                        {(extractedData.processorMarkupRate * 100).toFixed(2)}% above interchange
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">—</p>
-                  )}
+          {/* ── INTERCHANGE + PROCESSOR FEES ────────────────── */}
+          {extractedData.totalInterchange > 0 && (
+            <div className="grid md:grid-cols-2 gap-4 mb-8">
+              {/* Interchange */}
+              <div className="bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-900/30 dark:to-orange-800/30 p-5 rounded-xl border border-orange-200 dark:border-orange-700">
+                <p className="text-sm font-bold uppercase tracking-widest text-orange-600 dark:text-orange-400 mb-3">Interchange</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs font-semibold text-orange-600 dark:text-orange-400 uppercase tracking-wider mb-1">Effective Rate</p>
+                    <p className="text-2xl font-bold text-orange-700 dark:text-orange-300">
+                      {((extractedData.totalInterchange / extractedData.totalVolume) * 100).toFixed(2)}%
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-orange-600 dark:text-orange-400 uppercase tracking-wider mb-1">Total Spend</p>
+                    <p className="text-2xl font-bold text-orange-700 dark:text-orange-300">
+                      {formatCurrency(extractedData.totalInterchange)}
+                    </p>
+                  </div>
                 </div>
-                <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
-                  <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Per Transaction Fees</p>
-                  {(extractedData.interchangePerTxnFee || extractedData.processorPerAuthFee) ? (
-                    <>
-                      <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
-                        {formatCurrency((extractedData.interchangePerTxnFee ?? 0) + (extractedData.processorPerAuthFee ?? 0))}
-                      </p>
-                      <div className="mt-2 space-y-0.5">
-                        {extractedData.interchangePerTxnFee ? (
-                          <p className="text-xs text-green-600 dark:text-green-400 font-medium">
-                            {formatCurrency(extractedData.interchangePerTxnFee)} interchange
-                          </p>
-                        ) : null}
-                        {extractedData.processorPerAuthFee ? (
-                          <p className="text-xs text-green-600 dark:text-green-400 font-medium">
-                            + {formatCurrency(extractedData.processorPerAuthFee)} processor
-                          </p>
-                        ) : null}
+              </div>
+              {/* Processor Fees */}
+              <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-5 rounded-xl border border-purple-200 dark:border-purple-700">
+                <p className="text-sm font-bold uppercase tracking-widest text-purple-600 dark:text-purple-400 mb-3">Processor Fees</p>
+                {(() => {
+                  const processorSpend = extractedData.totalFees - extractedData.totalInterchange
+                  const processorRate = (processorSpend / extractedData.totalVolume) * 100
+                  return (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <p className="text-xs font-semibold text-purple-600 dark:text-purple-400 uppercase tracking-wider mb-1">Effective Rate</p>
+                        <p className="text-2xl font-bold text-purple-700 dark:text-purple-300">{processorRate.toFixed(2)}%</p>
                       </div>
-                    </>
-                  ) : (
-                    <>
-                      <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
-                        {formatCurrency(extractedData.perTransactionRate)}
-                      </p>
-                      <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">per transaction</p>
-                    </>
-                  )}
-                </div>
-              </>
-            )}
+                      <div>
+                        <p className="text-xs font-semibold text-purple-600 dark:text-purple-400 uppercase tracking-wider mb-1">Total Spend</p>
+                        <p className="text-2xl font-bold text-purple-700 dark:text-purple-300">{formatCurrency(processorSpend)}</p>
+                      </div>
+                    </div>
+                  )
+                })()}
+                {/* I+ extra detail */}
+                {extractedData.currentProcessingMethod === 'Interchange Plus' && (extractedData.processorMarkupRate || extractedData.processorPerAuthFee) && (
+                  <div className="mt-3 pt-3 border-t border-purple-200 dark:border-purple-700 flex gap-4 text-xs text-purple-600 dark:text-purple-400">
+                    {extractedData.processorMarkupRate ? (
+                      <span>{(extractedData.processorMarkupRate * 100).toFixed(2)}% markup</span>
+                    ) : null}
+                    {extractedData.processorPerAuthFee ? (
+                      <span>{formatCurrency(extractedData.processorPerAuthFee)} per auth</span>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
-            {/* Flat / Dual Pricing: Rate % + Per Transaction Fee */}
-            {(extractedData.currentProcessingMethod === 'Flat Rate' || extractedData.currentProcessingMethod === 'Dual Pricing') && (
-              <>
-                <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/30 dark:to-purple-800/30 p-6 rounded-xl border border-purple-200 dark:border-purple-700">
-                  <p className="text-sm font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider">Rate</p>
-                  <p className="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">
-                    {calculateProcessingRate().toFixed(2)}%
-                  </p>
-                  <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-medium">
-                    {formatCurrency(calculateProcessingFeesDollars())} spent
-                  </p>
-                </div>
-                <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/30 dark:to-green-800/30 p-6 rounded-xl border border-green-200 dark:border-green-700">
-                  <p className="text-sm font-semibold text-green-700 dark:text-green-300 uppercase tracking-wider">Per Transaction</p>
-                  <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">
-                    {formatCurrency(extractedData.perTransactionRate)}
-                  </p>
-                  <p className="text-xs text-green-600 dark:text-green-400 mt-2 font-medium">per transaction</p>
-                </div>
-              </>
-            )}
+          {/* Hidden Margin Flags */}
+          {extractedData.hiddenMarginFlags && extractedData.hiddenMarginFlags.length > 0 && (
+            <div className="mb-8">
+              <h3 className="text-xl font-bold mb-4 text-gray-900 dark:text-white">⚠️ Hidden Margin Detected</h3>
+              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-xl p-4 space-y-2">
+                {extractedData.hiddenMarginFlags.map((flag, i) => (
+                  <div key={i} className="flex items-start gap-2">
+                    <span className="text-amber-500 mt-0.5 flex-shrink-0">•</span>
+                    <p className="text-sm text-amber-800 dark:text-amber-200">{flag}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
-            {/* Tiered: no extra cards — card breakdown carries the detail */}
-          </div>
-
-          {/* Card Breakdown */}
+          {/* ── CARD BREAKDOWN ───────────────────────────────── */}
           <div>
             <h3 className="text-xl font-bold mb-4 text-gray-900 dark:text-white">💳 Card Breakdown</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              {Object.entries(extractedData.cardBreakdown).map(([card, data]) => (
-                <div key={card} className="bg-gradient-to-br from-gray-50 to-gray-100 dark:from-slate-700 dark:to-slate-800 p-6 rounded-xl border border-gray-200 dark:border-slate-600 hover:shadow-md transition-all duration-200">
-                  <div className="flex items-center mb-3">
-                    {getCardLogo(card)}
-                    <p className="text-xs text-gray-600 dark:text-gray-400 uppercase font-bold tracking-wider">{formatCardTypeName(card)}</p>
-                  </div>
-                  <div className="space-y-3">
-                    <div>
-                      <p className="text-2xl font-bold text-gray-900 dark:text-white">
-                        {formatCurrency(data.volume)}
-                      </p>
-                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium mt-1">
+              {Object.entries(extractedData.cardBreakdown).map(([card, data]) => {
+                const isIPlus = extractedData.currentProcessingMethod === 'Interchange Plus'
+                const isTiered = extractedData.currentProcessingMethod === 'Tiered Pricing'
+
+                // Per-card interchange amount (for I+: rate is the interchange rate)
+                const cardInterchangeAmt = isIPlus ? data.volume * data.rate : 0
+                const cardInterchangeRate = isIPlus ? data.rate * 100 : 0
+
+                // Per-card processor fees (for I+)
+                const cardTxnCount = data.transactionCount && data.transactionCount > 0
+                  ? data.transactionCount
+                  : (extractedData.averageTicketSize && extractedData.averageTicketSize > 0
+                      ? Math.round(data.volume / extractedData.averageTicketSize) : 0)
+                const cardProcessorAmt = isIPlus
+                  ? (data.volume * (extractedData.processorMarkupRate ?? 0)) + (cardTxnCount * (extractedData.processorPerAuthFee ?? 0))
+                  : 0
+                const cardProcessorRate = isIPlus && data.volume > 0 ? (cardProcessorAmt / data.volume) * 100 : 0
+
+                // For non-I+: total fees from the rate on the card
+                const cardTotalFees = calculateCardFees(data)
+                const cardTotalRate = data.rate * 100
+
+                return (
+                  <div key={card} className="bg-gradient-to-br from-gray-50 to-gray-100 dark:from-slate-700 dark:to-slate-800 p-5 rounded-xl border border-gray-200 dark:border-slate-600 hover:shadow-md transition-all duration-200">
+                    {/* Card header */}
+                    <div className="flex items-center mb-3">
+                      {getCardLogo(card)}
+                      <p className="text-xs text-gray-600 dark:text-gray-400 uppercase font-bold tracking-wider">{formatCardTypeName(card)}</p>
+                    </div>
+
+                    {/* Volume */}
+                    <div className="mb-3">
+                      <p className="text-xl font-bold text-gray-900 dark:text-white">{formatCurrency(data.volume)}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                         {((data.volume / extractedData.totalVolume) * 100).toFixed(1)}% of volume
+                        {data.transactionCount ? ` · ${data.transactionCount.toLocaleString()} txns` : ''}
+                        {data.averageTicketSize ? ` · ${formatCurrency(data.averageTicketSize)} avg` : ''}
                       </p>
-                      {data.transactionCount ? (
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{data.transactionCount} txns</p>
-                      ) : null}
                     </div>
 
-                    {/* Rate — shown for all methods */}
-                    <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
-                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">
-                        {extractedData.currentProcessingMethod === 'Interchange Plus' ? 'Effective Interchange Rate' : 'Rate'}
-                      </p>
-                      <div className="flex items-baseline justify-between mt-1">
-                        <p className="text-lg font-bold text-blue-600 dark:text-blue-400">
-                          {(data.rate * 100).toFixed(2)}%
-                        </p>
-                        {extractedData.currentProcessingMethod !== 'Tiered Pricing' && (
-                          <p className="text-sm text-blue-600 dark:text-blue-400 font-medium">
-                            {formatCurrency(calculateCardRateBasedFees(data))}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Per Transaction — shown for all methods */}
-                    <div>
-                      <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Per Transaction</p>
-                      <div className="flex items-baseline justify-between mt-1">
-                        <p className="text-lg font-bold text-green-600 dark:text-green-400">
-                          {formatCurrency(data.perTransactionFee)}
-                        </p>
-                        {extractedData.currentProcessingMethod !== 'Tiered Pricing' && (
-                          <p className="text-sm text-green-600 dark:text-green-400 font-medium">
-                            {formatCurrency(calculateCardTransactionBasedFees(data))}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Avg Ticket + Total Fees — only for non-tiered */}
-                    {extractedData.currentProcessingMethod !== 'Tiered Pricing' && (
-                      <>
-                        {data.averageTicketSize ? (
-                          <div>
-                            <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Avg Ticket</p>
-                            <p className="text-lg font-bold text-yellow-600 dark:text-yellow-400 mt-1">{formatCurrency(data.averageTicketSize)}</p>
+                    {isIPlus ? (
+                      /* I+: split into Interchange + Processor Fees */
+                      <div className="space-y-2">
+                        <div className="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-3 border border-orange-200 dark:border-orange-700/50">
+                          <p className="text-xs font-bold text-orange-600 dark:text-orange-400 uppercase tracking-wider mb-1">Interchange</p>
+                          <div className="flex justify-between items-baseline">
+                            <span className="text-base font-bold text-orange-700 dark:text-orange-300">{cardInterchangeRate.toFixed(2)}%</span>
+                            <span className="text-sm font-semibold text-orange-600 dark:text-orange-400">{formatCurrency(cardInterchangeAmt)}</span>
                           </div>
-                        ) : null}
-                        <div className="pt-3 border-t border-gray-300 dark:border-slate-600">
-                          <p className="text-xs text-gray-600 dark:text-gray-400 font-medium">Total Fees</p>
-                          <p className="text-lg font-bold text-orange-600 dark:text-orange-400 mt-1">
-                            {formatCurrency(calculateCardFees(data))}
-                          </p>
                         </div>
-                      </>
+                        <div className="bg-purple-50 dark:bg-purple-900/20 rounded-lg p-3 border border-purple-200 dark:border-purple-700/50">
+                          <p className="text-xs font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider mb-1">Processor Fees</p>
+                          <div className="flex justify-between items-baseline">
+                            <span className="text-base font-bold text-purple-700 dark:text-purple-300">{cardProcessorRate.toFixed(2)}%</span>
+                            <span className="text-sm font-semibold text-purple-600 dark:text-purple-400">{formatCurrency(cardProcessorAmt)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Tiered / Flat / Dual: show all-in rate + total fees */
+                      <div className="space-y-2">
+                        <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3 border border-blue-200 dark:border-blue-700/50">
+                          <p className="text-xs font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider mb-1">
+                            {isTiered ? 'Tier Rate' : 'Rate'}
+                          </p>
+                          <div className="flex justify-between items-baseline">
+                            <span className="text-base font-bold text-blue-700 dark:text-blue-300">{cardTotalRate.toFixed(2)}%</span>
+                            {data.perTransactionFee > 0 && (
+                              <span className="text-xs text-blue-500 dark:text-blue-400">+{formatCurrency(data.perTransactionFee)}/txn</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="bg-slate-100 dark:bg-slate-600/40 rounded-lg p-3 border border-gray-200 dark:border-slate-600">
+                          <p className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-1">Total Fees</p>
+                          <span className="text-base font-bold text-gray-800 dark:text-gray-200">{formatCurrency(cardTotalFees)}</span>
+                        </div>
+                      </div>
                     )}
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         </div>
