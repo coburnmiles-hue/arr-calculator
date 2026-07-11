@@ -517,6 +517,15 @@ export default function ProcessingCalculator() {
                 <p className="text-xl font-bold text-blue-600 dark:text-blue-400">{formatCurrency(extractedData.totalFees)}</p>
                 <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">all fees + interchange</p>
               </div>
+              {(extractedData as any).otherWithholdings > 0 && (
+                <div className="bg-gradient-to-br from-rose-50 to-rose-100 dark:from-rose-900/30 dark:to-rose-800/30 p-5 rounded-xl border border-rose-200 dark:border-rose-700">
+                  <p className="text-xs font-semibold text-rose-700 dark:text-rose-300 uppercase tracking-wider mb-2">Other Withholdings</p>
+                  <p className="text-xl font-bold text-rose-600 dark:text-rose-400">{formatCurrency((extractedData as any).otherWithholdings)}</p>
+                  <p className="text-xs text-rose-600 dark:text-rose-400 mt-1">
+                    {(((extractedData as any).otherWithholdings / extractedData.totalVolume) * 100).toFixed(2)}% of volume · included in total spend
+                  </p>
+                </div>
+              )}
               <div className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-900/30 dark:to-red-800/30 p-5 rounded-xl border border-red-200 dark:border-red-700">
                 <p className="text-xs font-semibold text-red-700 dark:text-red-300 uppercase tracking-wider mb-2">Effective Rate</p>
                 <p className="text-xl font-bold text-red-600 dark:text-red-400">{calculateEffectiveRate().toFixed(2)}%</p>

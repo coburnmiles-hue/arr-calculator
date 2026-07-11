@@ -32,6 +32,7 @@ const responseSchema = {
     monthlyFixedFees: { type: SchemaType.NUMBER },
     statementPeriod: { type: SchemaType.STRING },
     processorName: { type: SchemaType.STRING },
+    otherWithholdings: { type: SchemaType.NUMBER },
     hiddenMarginFlags: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
     cardBreakdown: {
       type: SchemaType.ARRAY,
@@ -80,7 +81,7 @@ function validateExtraction(data: any): string[] {
     )
   } else if (totalFees > 0 && effectiveRate < 0.008) {
     warnings.push(
-      `Effective rate is ${(effectiveRate * 100).toFixed(2)}% — unusually low. Some fees may have been missed (check for a second fees page).`
+      `Effective rate is ${(effectiveRate * 100).toFixed(2)}% — unusually low. Some fees may have been missed (check for a second fees page or an "Other Withholdings" column).`
     )
   }
 
@@ -173,11 +174,18 @@ STEP 1 — LOCATE TOTALS
 ══════════════════════════════════════════
 Find from the statement:
   - totalVolume: total processing volume (sum all pages)
-  - totalFees: total ALL fees charged (everything — interchange + markup + fixed)
+  - totalFees: total ALL fees charged (everything — interchange + markup + fixed + otherWithholdings)
+  - otherWithholdings: the dollar total of any column labeled "Other Withholdings", "Withholdings",
+    "Reserves", "Other Deductions", "Other Charges", "Adjustments" (when appearing as a settlement
+    deduction column next to a Fees column in a rate table), or any similarly named column that
+    represents additional deductions from the merchant's settlement beyond the stated processing fees.
+    ⚠️ CRITICAL: otherWithholdings MUST be added into totalFees — it is a real cost to the merchant.
+    totalFees = interchange + markup fees + fixed fees + otherWithholdings
+    Understating totalFees by omitting this column is the #1 source of incorrect effective rates.
   - transactionCount: exact count from the statement (do not estimate unless unavailable)
   - averageTicketSize: average sale amount in dollars
 
-Effective Rate = totalFees / totalVolume  (the merchant's true blended cost)
+Effective Rate = totalFees / totalVolume  (the merchant's true blended cost, ALL deductions included)
 
 ══════════════════════════════════════════
 STEP 2 — DETECT PRICING MODEL
@@ -315,6 +323,8 @@ Common hiding spots:
   - Non-qualified surcharges added on top of already-marked-up tiered rates
   - "Program fees" or "data usage fees" with values inconsistent with card brand published schedules
   - Any fee labeled as a pass-through but where the total does not reconcile with published card brand rates
+  - "Other Withholdings" or "Withholdings" column present — describe what it likely contains and confirm
+    it has been included in totalFees
 
 ══════════════════════════════════════════
 STEP 7 — STATEMENT FORMAT
@@ -341,6 +351,7 @@ RETURN THIS JSON:
   "processorPerAuthFee": <number — I+ only: processor's per-auth fee in dollars (e.g. 0.09); else 0>,
   "interchangePerTxnFee": <number — I+ only: blended card-network per-txn fee in dollars (e.g. 0.08); else 0>,
   "monthlyFixedFees": <number — sum of fixed monthly fees (statement fee, PCI fee, gateway fee, monthly minimum, etc.) in dollars; 0 if none>,
+  "otherWithholdings": <number — total of "Other Withholdings" / "Withholdings" / "Reserves" / settlement-deduction columns; MUST already be included in totalFees; 0 if none found>,
   "statementPeriod": <string — the statement month/period, e.g. "March 2026"; "Unknown" if not found>,
   "processorName": <string — the processing company name from the statement header; "Unknown" if not found>,
   "hiddenMarginFlags": <array of strings — fees suspected to contain hidden processor markup>,
@@ -471,6 +482,13 @@ IMPORTANT RULES:
     data.processorPerAuthFee = toNum(data.processorPerAuthFee)
     data.interchangePerTxnFee = toNum(data.interchangePerTxnFee)
     data.monthlyFixedFees = toNum(data.monthlyFixedFees)
+    data.otherWithholdings = toNum(data.otherWithholdings)
+
+    // Safety net: if otherWithholdings > 0 but totalFees doesn't seem to include it
+    // (i.e. totalFees < otherWithholdings), force-add it so the effective rate is correct.
+    if (data.otherWithholdings > 0 && data.totalFees < data.otherWithholdings) {
+      data.totalFees += data.otherWithholdings
+    }
 
     // Normalize and ensure per-card averageTicketSize exists
     if (data.cardBreakdown && typeof data.cardBreakdown === 'object') {

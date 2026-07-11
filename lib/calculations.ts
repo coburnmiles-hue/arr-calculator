@@ -23,6 +23,7 @@ export interface ExtractedData {
   processorPerAuthFee?: number
   interchangePerTxnFee?: number
   monthlyFixedFees?: number
+  otherWithholdings?: number
   hiddenMarginFlags?: string[]
   validationWarnings?: string[]
 }
