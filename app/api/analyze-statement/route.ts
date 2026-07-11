@@ -1,13 +1,155 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai'
+import { verifyToken } from '@/lib/auth'
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
 
+// Structured output schema — forces Gemini to return exactly this shape,
+// eliminating JSON parse failures and missing/misnamed fields.
+const responseSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    totalVolume: { type: SchemaType.NUMBER },
+    totalInterchange: { type: SchemaType.NUMBER },
+    totalFees: { type: SchemaType.NUMBER },
+    transactionCount: { type: SchemaType.NUMBER },
+    transactionCountEstimated: { type: SchemaType.BOOLEAN },
+    perTransactionRate: { type: SchemaType.NUMBER },
+    averageTicketSize: { type: SchemaType.NUMBER },
+    currentProcessingMethod: {
+      type: SchemaType.STRING,
+      enum: ['Interchange Plus', 'Flat Rate', 'Tiered Pricing', 'Dual Pricing', 'Unknown'],
+      format: 'enum',
+    },
+    statementFormat: {
+      type: SchemaType.STRING,
+      enum: ['card_split', 'bundled_with_amex', 'tiered', 'unknown'],
+      format: 'enum',
+    },
+    processorMarkupRate: { type: SchemaType.NUMBER },
+    processorPerAuthFee: { type: SchemaType.NUMBER },
+    interchangePerTxnFee: { type: SchemaType.NUMBER },
+    monthlyFixedFees: { type: SchemaType.NUMBER },
+    statementPeriod: { type: SchemaType.STRING },
+    processorName: { type: SchemaType.STRING },
+    hiddenMarginFlags: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+    cardBreakdown: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          key: { type: SchemaType.STRING },
+          volume: { type: SchemaType.NUMBER },
+          rate: { type: SchemaType.NUMBER },
+          perTransactionFee: { type: SchemaType.NUMBER },
+          transactionCount: { type: SchemaType.NUMBER },
+          averageTicketSize: { type: SchemaType.NUMBER },
+        },
+        required: ['key', 'volume', 'rate'],
+      },
+    },
+  },
+  required: [
+    'totalVolume',
+    'totalInterchange',
+    'totalFees',
+    'transactionCount',
+    'averageTicketSize',
+    'currentProcessingMethod',
+    'statementFormat',
+    'cardBreakdown',
+    'hiddenMarginFlags',
+  ],
+} as const
+
+// Cross-check extracted values against each other; returns human-readable warnings.
+function validateExtraction(data: any): string[] {
+  const warnings: string[] = []
+  const { totalVolume, totalFees, totalInterchange, transactionCount, averageTicketSize } = data
+
+  if (!totalVolume || totalVolume <= 0) {
+    warnings.push('Total volume could not be extracted — all projections will be unreliable.')
+    return warnings
+  }
+
+  // Effective rate sanity: typical merchant all-in rate is 1.5%–4.5%
+  const effectiveRate = totalFees / totalVolume
+  if (effectiveRate > 0.06) {
+    warnings.push(
+      `Effective rate is ${(effectiveRate * 100).toFixed(2)}% — unusually high. Total fees may include non-processing charges or volume may be under-extracted.`
+    )
+  } else if (totalFees > 0 && effectiveRate < 0.008) {
+    warnings.push(
+      `Effective rate is ${(effectiveRate * 100).toFixed(2)}% — unusually low. Some fees may have been missed (check for a second fees page).`
+    )
+  }
+
+  // Interchange should never exceed total fees
+  if (totalInterchange > totalFees && totalFees > 0) {
+    warnings.push(
+      `Extracted interchange (${totalInterchange.toFixed(2)}) exceeds total fees (${totalFees.toFixed(2)}) — one of these is wrong.`
+    )
+  }
+
+  // Interchange as share of fees: usually 60–90% on I+ statements
+  if (totalInterchange > 0 && totalFees > 0) {
+    const icShare = totalInterchange / totalFees
+    if (data.currentProcessingMethod === 'Interchange Plus' && icShare < 0.4) {
+      warnings.push(
+        `Interchange is only ${(icShare * 100).toFixed(0)}% of total fees — for Interchange Plus this is usually 60–90%. Some interchange lines may have been missed.`
+      )
+    }
+  }
+
+  // Card breakdown volumes should roughly reconcile with total volume (±5%)
+  const cb = data.cardBreakdown
+  if (cb && typeof cb === 'object' && Object.keys(cb).length > 0) {
+    const cardVolumeSum = Object.values(cb).reduce((s: number, c: any) => s + (c?.volume || 0), 0)
+    const diff = Math.abs(cardVolumeSum - totalVolume) / totalVolume
+    if (diff > 0.05) {
+      warnings.push(
+        `Card breakdown volumes sum to ${cardVolumeSum.toFixed(2)} but total volume is ${totalVolume.toFixed(2)} (${(diff * 100).toFixed(1)}% off) — some card volume may be missing or double-counted.`
+      )
+    }
+
+    // Per-card transaction counts should roughly reconcile with total count (±10%)
+    if (transactionCount > 0) {
+      const cardTxnSum = Object.values(cb).reduce((s: number, c: any) => s + (c?.transactionCount || 0), 0)
+      if (cardTxnSum > 0) {
+        const txnDiff = Math.abs(cardTxnSum - transactionCount) / transactionCount
+        if (txnDiff > 0.1) {
+          warnings.push(
+            `Card transaction counts sum to ${cardTxnSum} but statement total is ${transactionCount} — counts may be misread.`
+          )
+        }
+      }
+    }
+  }
+
+  // Average ticket cross-check: volume / count should match extracted avg ticket (±15%)
+  if (transactionCount > 0 && averageTicketSize > 0) {
+    const impliedTicket = totalVolume / transactionCount
+    const ticketDiff = Math.abs(impliedTicket - averageTicketSize) / averageTicketSize
+    if (ticketDiff > 0.15) {
+      warnings.push(
+        `Extracted average ticket ($${averageTicketSize.toFixed(2)}) doesn't match volume ÷ transactions ($${impliedTicket.toFixed(2)}) — transaction count or avg ticket may be misread.`
+      )
+    }
+  }
+
+  return warnings
+}
+
 export async function POST(request: NextRequest) {
   try {
+    const username = verifyToken(request.cookies.get('authToken')?.value)
+    if (!username) {
+      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    }
+
     const formData = await request.formData()
     const files = formData.getAll('files') as File[]
-    
+
     if (files.length === 0) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 })
     }
@@ -52,14 +194,43 @@ Classify as one of:
     * OR separate unique percentages per card network (Visa at X%, Mastercard at Y%, Amex at Z%)
     * Little or no interchange detail visible
 
-  "Flat Rate" — Signal:
+  "Flat Rate" — Signals:
     * Single blended percentage for all cards, no interchange detail
+    * OR a rate table with rows per entry method / card type (see STEP 2b below)
 
   "Dual Pricing" — Signals:
     * "Cash Discount" language or dual pricing tiers (one rate, one surcharge)
     * Customer fee adjustments
 
   "Unknown" — if none of the above can be determined
+
+══════════════════════════════════════════
+STEP 2b — ENTRY-METHOD BUNDLED FLAT RATE FORMAT
+══════════════════════════════════════════
+Some processors show a rate table that segments by ENTRY METHOD and CARD TYPE (not by card network).
+Detect this format when ALL of these are true:
+  * Rows include labels like "V/MC/D (Swipe/Dip/Tap) – Debit/Prepaid", "V/MC/D (Swipe/Dip/Tap) – Credit", "V/MC/D (Keyed)", "Amex"
+  * Each row shows a flat rate (e.g., "1.75% + 0.2") — NOT interchange categories
+  * There is NO interchange detail section, NO individual interchange category line items
+  * A totals row shows Payments (count), Refunds, Fees, Fee Adjustments, Fees Adjusted, Net
+
+When this format is detected, set pricingModel = "Flat Rate" and use these cardBreakdown keys:
+  "debit_swipe"   — "V/MC/D (Swipe/Dip/Tap) – Debit/Prepaid" → Pin-Based / ATM debit
+  "credit_swipe"  — "V/MC/D (Swipe/Dip/Tap) – Credit" → standard swiped/dipped/tapped credit
+  "keyed"         — "V/MC/D (Keyed)" → manually entered card-not-present; non-qualified tier
+  "amex"          — "Amex" row
+
+CRITICAL PARSING RULES for this format:
+  1. The "Rate" column shows "X% + Y" where Y is ALWAYS a per-transaction fee in DOLLARS.
+     "1.75% + 0.2"  → rate: 0.0175, perTransactionFee: 0.20
+     "2.91% + 0.1"  → rate: 0.0291, perTransactionFee: 0.10
+     "3.5% + 0.15"  → rate: 0.035,  perTransactionFee: 0.15
+     Never treat the "+Y" as a percentage — it is always cents per transaction.
+  2. True fee per row = "Fees Adjusted" column (Fees + Fee Adjustments). Use this value, NOT the raw "Fees" column.
+  3. totalInterchange = 0 — this format shows no interchange passthrough.
+  4. transactionCount per card = the "Payments" column for that row.
+  5. "V/MC/D (Keyed)" volume appears in some comparison tools reclassified under "AMEX Non-Qualified" because it shares the same rate — this is expected; extract it as "keyed" in your output.
+  6. totalFees = the "Fees Adjusted" cell in the Total row (not the sum of raw "Fees" column).
 
 ══════════════════════════════════════════
 STEP 3 — SEPARATE CARD COSTS FROM PROCESSOR REVENUE
@@ -169,22 +340,27 @@ RETURN THIS JSON:
   "processorMarkupRate": <number — I+ only: processor's markup as decimal (e.g. 0.0028); else 0>,
   "processorPerAuthFee": <number — I+ only: processor's per-auth fee in dollars (e.g. 0.09); else 0>,
   "interchangePerTxnFee": <number — I+ only: blended card-network per-txn fee in dollars (e.g. 0.08); else 0>,
+  "monthlyFixedFees": <number — sum of fixed monthly fees (statement fee, PCI fee, gateway fee, monthly minimum, etc.) in dollars; 0 if none>,
+  "statementPeriod": <string — the statement month/period, e.g. "March 2026"; "Unknown" if not found>,
+  "processorName": <string — the processing company name from the statement header; "Unknown" if not found>,
   "hiddenMarginFlags": <array of strings — fees suspected to contain hidden processor markup>,
-  "cardBreakdown": {
-    "<key>": {
+  "cardBreakdown": [
+    {
+      "key": <string — card type key, see conventions below>,
       "volume": <number>,
       "rate": <number — as decimal>,
       "perTransactionFee": <number>,
       "transactionCount": <number>,
       "averageTicketSize": <number>
     }
-  }
+  ]
 }
 
-cardBreakdown key conventions:
+cardBreakdown "key" conventions:
   - I+ or card_split: "visa", "mastercard", "amex", "discover", "debit"
   - bundled_with_amex: "visa_mastercard_discover", "amex", "amex_keyed"
   - tiered: "check_card", "qualified", "mid_qualified", "non_qualified"
+  - entry-method bundled flat rate (STEP 2b): "debit_swipe", "credit_swipe", "keyed", "amex"
   - Swipe vs Keyed differences: "visa_swipe", "visa_keyed", etc.
   - Only include card types that actually appear in the statement
 
@@ -235,18 +411,36 @@ IMPORTANT RULES:
       generationConfig: {
         temperature: 0,          // Fully deterministic — same input → same output
         responseMimeType: 'application/json', // Force JSON output mode
+        responseSchema: responseSchema as any, // Enforce exact output structure
       }
     })
     const response = await result.response
     const text = response.text()
     console.log('Gemini raw response length:', text.length)
-    
-    // Extract JSON from response (remove markdown formatting if present)
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    const extractedData = jsonMatch ? JSON.parse(jsonMatch[0]) : null
+
+    // With responseSchema the output is guaranteed JSON, but keep the fallback for safety
+    let extractedData: any = null
+    try {
+      extractedData = JSON.parse(text)
+    } catch {
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      extractedData = jsonMatch ? JSON.parse(jsonMatch[0]) : null
+    }
 
     if (!extractedData) {
       throw new Error('Failed to extract data from statement')
+    }
+
+    // Convert cardBreakdown from schema array format back to keyed record
+    if (Array.isArray(extractedData.cardBreakdown)) {
+      const record: Record<string, any> = {}
+      for (const entry of extractedData.cardBreakdown) {
+        if (entry && entry.key) {
+          const { key, ...rest } = entry
+          record[key] = rest
+        }
+      }
+      extractedData.cardBreakdown = record
     }
 
     // Post-process: ensure numeric fields and compute estimated per-transaction rate
@@ -272,9 +466,11 @@ IMPORTANT RULES:
     data.averageTicketSize = toNum(data.averageTicketSize)
     data.totalVolume = toNum(data.totalVolume)
     data.totalFees = toNum(data.totalFees)
+    data.totalInterchange = toNum(data.totalInterchange)
     data.processorMarkupRate = toNum(data.processorMarkupRate)
     data.processorPerAuthFee = toNum(data.processorPerAuthFee)
     data.interchangePerTxnFee = toNum(data.interchangePerTxnFee)
+    data.monthlyFixedFees = toNum(data.monthlyFixedFees)
 
     // Normalize and ensure per-card averageTicketSize exists
     if (data.cardBreakdown && typeof data.cardBreakdown === 'object') {
@@ -327,6 +523,12 @@ IMPORTANT RULES:
       }
     } else {
       data.perTransactionRateEstimated = false
+    }
+
+    // Cross-check extracted values and attach human-readable warnings
+    data.validationWarnings = validateExtraction(data)
+    if (data.validationWarnings.length > 0) {
+      console.log('Validation warnings:', data.validationWarnings)
     }
 
     return NextResponse.json({ data })

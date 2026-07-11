@@ -1,30 +1,15 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-
-interface CardBreakdownData {
-  volume: number
-  rate: number
-  perTransactionFee: number
-  averageTicketSize?: number
-  transactionCount?: number
-}
-
-interface ExtractedData {
-  totalVolume: number
-  totalInterchange: number
-  totalFees: number
-  perTransactionRate: number
-  averageTicketSize?: number
-  transactionCount?: number
-  currentProcessingMethod: string
-  cardBreakdown: Record<string, CardBreakdownData>
-  statementFormat?: 'card_split' | 'bundled_with_amex' | 'unknown'
-  processorMarkupRate?: number
-  processorPerAuthFee?: number
-  interchangePerTxnFee?: number
-  hiddenMarginFlags?: string[]
-}
+import {
+  type ExtractedData,
+  type Rates,
+  type PricingModel,
+  calculateModel,
+  compareModels,
+  currentEffectiveRate,
+  cardFees,
+} from '@/lib/calculations'
 
 interface SavedAnalysis {
   id: string
@@ -32,18 +17,7 @@ interface SavedAnalysis {
   timestamp: Date
   extractedData: ExtractedData
   pricingModel: string
-  rates: {
-    tieredCheckCardRate: string
-    tieredQualifiedRate: string
-    tieredMidQualifiedRate: string
-    tieredNonQualifiedRate: string
-    tieredPerTransactionFee: string
-    flatRate: string
-    flatPerTransactionFee: string
-    dualPricingRate: string
-    interchangePlusMarkup: string
-    interchangePlusPerTransactionFee: string
-  }
+  rates: Rates
 }
 
 export default function ProcessingCalculator() {
@@ -56,7 +30,7 @@ export default function ProcessingCalculator() {
   const [accountName, setAccountName] = useState<string>('')
   const [savedAnalyses, setSavedAnalyses] = useState<SavedAnalysis[]>([])
   const [showSavedAnalyses, setShowSavedAnalyses] = useState(false)
-  
+
   // Tiered pricing inputs
   const [tieredCheckCardRate, setTieredCheckCardRate] = useState<string>('')
   const [tieredQualifiedRate, setTieredQualifiedRate] = useState<string>('')
@@ -88,9 +62,7 @@ export default function ProcessingCalculator() {
           return
         }
         console.log('Loading analyses for username:', username)
-        const res = await fetch('/api/analyses', {
-          headers: { 'x-username': username }
-        })
+        const res = await fetch('/api/analyses')
         console.log('GET /api/analyses status:', res.status)
         if (!res.ok) return
         const json = await res.json()
@@ -205,12 +177,25 @@ export default function ProcessingCalculator() {
   }
 
   const formatCardTypeName = (cardKey: string) => {
-    // Format card type keys for readable display
-    // e.g., "visa_mastercard_discover" -> "Visa/MC/Discover"
-    //       "amex_keyed" -> "Amex (Keyed)"
-    //       "amex_swipe" -> "Amex (Swipe)"
-    
-    // Handle bundled formats
+    // Explicit mappings for entry-method bundled flat rate format (STEP 2b)
+    const explicitNames: Record<string, string> = {
+      'debit_swipe': 'Debit/Prepaid (Swipe)',
+      'credit_swipe': 'Credit (Swipe/Dip/Tap)',
+      'keyed': 'Card-Not-Present (Keyed)',
+      'atm': 'ATM / Pin-Based Debit',
+      'check_card': 'Check Card / Debit',
+      'qualified': 'Qualified',
+      'mid_qualified': 'Mid-Qualified',
+      'non_qualified': 'Non-Qualified',
+      'visa': 'Visa',
+      'mastercard': 'Mastercard',
+      'amex': 'American Express',
+      'discover': 'Discover',
+      'debit': 'Debit',
+    }
+    if (explicitNames[cardKey]) return explicitNames[cardKey]
+
+    // Handle compound keys like "visa_mastercard_discover", "amex_keyed", "visa_swipe"
     if (cardKey.includes('_')) {
       const parts = cardKey.split('_')
       const cards = parts.filter(p => !['swipe', 'keyed', 'online'].includes(p))
@@ -228,310 +213,38 @@ export default function ProcessingCalculator() {
       return cardDisplay + typeDisplay
     }
     
-    // Single card types
-    const cardNames: Record<string, string> = {
-      'visa': 'Visa',
-      'mastercard': 'Mastercard',
-      'amex': 'American Express',
-      'discover': 'Discover'
-    }
-    
-    return cardNames[cardKey] || (cardKey.charAt(0).toUpperCase() + cardKey.slice(1))
+    return cardKey.charAt(0).toUpperCase() + cardKey.slice(1)
   }
 
-  // Estimate interchange costs based on typical card mix
-  const estimateInterchangeCosts = (totalVolume: number, estimatedTransactions: number) => {
-    // Card mix breakdown:
-    // 60% basic debit: 1.19% + $0.12 per transaction
-    // 15% basic credit: 2.35% + $0.10 per transaction
-    // 15% consumer credit: 2.5% + $0.08 per transaction
-    // 10% rewards credit: 2.8% + $0.12 per transaction
-    
-    const basicDebitVolume = totalVolume * 0.60
-    const basicCreditVolume = totalVolume * 0.15
-    const consumerCreditVolume = totalVolume * 0.15
-    const rewardsCreditVolume = totalVolume * 0.10
-    
-    const basicDebitTransactions = estimatedTransactions * 0.60
-    const basicCreditTransactions = estimatedTransactions * 0.15
-    const consumerCreditTransactions = estimatedTransactions * 0.15
-    const rewardsCreditTransactions = estimatedTransactions * 0.10
-    
-    const basicDebitCost = (basicDebitVolume * 0.0119) + (basicDebitTransactions * 0.12)
-    const basicCreditCost = (basicCreditVolume * 0.0235) + (basicCreditTransactions * 0.10)
-    const consumerCreditCost = (consumerCreditVolume * 0.025) + (consumerCreditTransactions * 0.08)
-    const rewardsCreditCost = (rewardsCreditVolume * 0.028) + (rewardsCreditTransactions * 0.12)
-    
-    const totalInterchangeCost = basicDebitCost + basicCreditCost + consumerCreditCost + rewardsCreditCost
-    
-    return {
-      totalInterchangeCost,
-      breakdown: {
-        basicDebit: basicDebitCost,
-        basicCredit: basicCreditCost,
-        consumerCredit: consumerCreditCost,
-        rewardsCredit: rewardsCreditCost
-      }
-    }
-  }
+  // Assemble current rate inputs into a Rates object for the calculation library
+  const currentRates = (): Rates => ({
+    tieredCheckCardRate,
+    tieredQualifiedRate,
+    tieredMidQualifiedRate,
+    tieredNonQualifiedRate,
+    tieredPerTransactionFee,
+    flatRate,
+    flatPerTransactionFee,
+    dualPricingRate,
+    interchangePlusMarkup,
+    interchangePlusPerTransactionFee,
+  })
 
-  // Calculate projected costs based on new pricing model
+  // Projected costs for the currently selected pricing model
   const calculateNewCosts = () => {
     if (!extractedData) return null
-
-    const { totalVolume, totalInterchange, cardBreakdown } = extractedData
-    
-    // Use actual transaction count from statement when available, otherwise estimate
-    const avgTicketFallback = extractedData.averageTicketSize && extractedData.averageTicketSize > 0
-      ? extractedData.averageTicketSize
-      : 45
-    const estimatedTransactions = extractedData.transactionCount && extractedData.transactionCount > 0
-      ? extractedData.transactionCount
-      : Math.round(totalVolume / avgTicketFallback)
-    
-    // Calculate estimated interchange costs (fallback when statement doesn't have it)
-    const interchangeEstimate = estimateInterchangeCosts(totalVolume, estimatedTransactions)
-
-    // Use actual interchange from the statement when available; fall back to estimate
-    // For flat/tiered/dual: the proposed rate is all-in, so profit = totalNewCost - interchange
-    // For I+: the proposed rate is just the markup, so profit = markup + per-txn fees
-    const actualInterchange = totalInterchange > 0
-      ? totalInterchange
-      : interchangeEstimate.totalInterchangeCost
-
-    switch (selectedPricingModel) {
-      case 'interchange_plus': {
-        const markup = parseFloat(interchangePlusMarkup) || 0
-        const perTxnFee = parseFloat(interchangePlusPerTransactionFee) || 0
-        
-        // New cost = interchange + (markup % of volume) + (per-txn fee × transactions)
-        const markupCost = totalVolume * (markup / 100)
-        const transactionFeeCost = perTxnFee * estimatedTransactions
-        const totalNewCost = totalInterchange + markupCost + transactionFeeCost
-        
-        return {
-          totalCost: totalNewCost,
-          effectiveRate: (totalNewCost / totalVolume) * 100,
-          estimatedInterchange: interchangeEstimate.totalInterchangeCost,
-          profit: markupCost + transactionFeeCost,
-          breakdown: {
-            interchange: totalInterchange,
-            markup: markupCost,
-            transactionFees: transactionFeeCost
-          }
-        }
-      }
-
-      case 'flat': {
-        const rate = parseFloat(flatRate) || 0
-        const perTxnFee = parseFloat(flatPerTransactionFee) || 0
-        
-        const rateCost = totalVolume * (rate / 100)
-        const transactionFeeCost = perTxnFee * estimatedTransactions
-        const totalNewCost = rateCost + transactionFeeCost
-        
-        return {
-          totalCost: totalNewCost,
-          effectiveRate: (totalNewCost / totalVolume) * 100,
-          estimatedInterchange: actualInterchange,
-          profit: totalNewCost - actualInterchange,
-          breakdown: {
-            rateCost: rateCost,
-            transactionFees: transactionFeeCost
-          }
-        }
-      }
-
-      case 'dual_pricing': {
-        const rate = parseFloat(dualPricingRate) || 0
-        const totalNewCost = totalVolume * (rate / 100)
-        
-        return {
-          totalCost: totalNewCost,
-          effectiveRate: rate,
-          estimatedInterchange: actualInterchange,
-          profit: totalNewCost - actualInterchange,
-          breakdown: {
-            cardRate: totalNewCost
-          }
-        }
-      }
-
-      case 'tiered': {
-        const checkCardRate = parseFloat(tieredCheckCardRate) || 0
-        const qualifiedRate = parseFloat(tieredQualifiedRate) || 0
-        const midQualifiedRate = parseFloat(tieredMidQualifiedRate) || 0
-        const nonQualifiedRate = parseFloat(tieredNonQualifiedRate) || 0
-        const perTxnFee = parseFloat(tieredPerTransactionFee) || 0
-        const transactionFeeCost = perTxnFee * estimatedTransactions
-
-        // Check if the breakdown already uses tier-named keys
-        const hasTierNames = Object.keys(cardBreakdown).some(k => {
-          const key = k.toLowerCase()
-          return key.includes('check_card') || key.includes('check card') ||
-            key.includes('mid_qual') || key.includes('non_qual') || key.includes('qual')
-        })
-
-        let totalNewCost = transactionFeeCost
-        const breakdownResult: Record<string, number> = { transactionFees: transactionFeeCost }
-
-        if (hasTierNames) {
-          // Use actual tier volumes directly
-          let checkCardVolume = 0, qualifiedVolume = 0, midQualifiedVolume = 0, nonQualifiedVolume = 0
-          Object.entries(cardBreakdown).forEach(([cardKey, data]) => {
-            const key = cardKey.toLowerCase()
-            if (key.includes('check_card') || key === 'debit' || key.includes('check card')) {
-              checkCardVolume += data.volume
-            } else if (key.includes('mid_qual') || key.includes('midqual') || key.includes('mid-qual')) {
-              midQualifiedVolume += data.volume
-            } else if (key.includes('non_qual') || key.includes('nonqual') || key.includes('non-qual')) {
-              nonQualifiedVolume += data.volume
-            } else if (key.includes('qual')) {
-              qualifiedVolume += data.volume
-            }
-          })
-          const checkCardCost = checkCardVolume * (checkCardRate / 100)
-          const qualifiedCost = qualifiedVolume * (qualifiedRate / 100)
-          const midQualifiedCost = midQualifiedVolume * (midQualifiedRate / 100)
-          const nonQualifiedCost = nonQualifiedVolume * (nonQualifiedRate / 100)
-          totalNewCost += checkCardCost + qualifiedCost + midQualifiedCost + nonQualifiedCost
-          breakdownResult.checkCard = checkCardCost
-          breakdownResult.qualified = qualifiedCost
-          breakdownResult.midQualified = midQualifiedCost
-          breakdownResult.nonQualified = nonQualifiedCost
-        } else {
-          // Card-type breakdown (Visa/MC/Amex/Discover or swipe/keyed style).
-          // Rank-match proposed tier rates to actual card volumes sorted by current rate.
-          // Cheapest current rate card → cheapest proposed tier rate, and so on.
-          // This ensures entering the current rates produces zero savings.
-          const proposedRatesSorted = [checkCardRate, qualifiedRate, midQualifiedRate, nonQualifiedRate]
-            .filter(r => r > 0)
-            .sort((a, b) => a - b)
-
-          const cardEntriesSorted = Object.entries(cardBreakdown)
-            .filter(([, d]) => d.volume > 0)
-            .sort((a, b) => a[1].rate - b[1].rate)
-
-          cardEntriesSorted.forEach(([key, data], i) => {
-            const rate = (proposedRatesSorted[i] ?? proposedRatesSorted[proposedRatesSorted.length - 1]) / 100
-            const cost = data.volume * rate
-            totalNewCost += cost
-            breakdownResult[key] = cost
-          })
-        }
-
-        return {
-          totalCost: totalNewCost,
-          effectiveRate: (totalNewCost / totalVolume) * 100,
-          estimatedInterchange: actualInterchange,
-          profit: totalNewCost - actualInterchange,
-          breakdown: breakdownResult
-        }
-      }
-
-      default:
-        return null
-    }
-  }
-
-  // Calculate weighted average processing rate from card-specific rates
-  const calculateProcessingRate = () => {
-    if (!extractedData) return 0
-    
-    const { cardBreakdown, totalVolume } = extractedData
-    
-    // Handle flexible card breakdown structure
-    let totalWeightedRate = 0
-    Object.entries(cardBreakdown).forEach(([_, data]) => {
-      totalWeightedRate += (data.rate * data.volume)
-    })
-    
-    const weightedRate = totalWeightedRate / totalVolume
-    return weightedRate * 100
-  }
-
-  // Calculate weighted average per-transaction fee from card-specific fees
-  const calculateWeightedPerTransactionRate = () => {
-    if (!extractedData) return 0
-    
-    const { cardBreakdown, totalVolume } = extractedData
-    
-    // Estimate number of transactions using average ticket size
-    // Restaurant industry standard: ~$50 average ticket
-    const avgTicket = 50
-    const estimatedTotalTransactions = totalVolume / avgTicket
-    
-    // Calculate total per-transaction fees based on volume
-    let totalPerTransactionCosts = 0
-    Object.entries(cardBreakdown).forEach(([_, data]) => {
-      const cardTransactions = data.volume / avgTicket
-      totalPerTransactionCosts += (data.perTransactionFee * cardTransactions)
-    })
-    
-    // Average per-transaction fee
-    if (estimatedTotalTransactions === 0) return 0
-    return totalPerTransactionCosts / estimatedTotalTransactions
-  }
-
-  // Calculate total dollars spent on processing rate fees
-  const calculateProcessingFeesDollars = () => {
-    if (!extractedData) return 0
-    const processingRate = calculateProcessingRate() / 100
-    return extractedData.totalVolume * processingRate
-  }
-
-  // Calculate total dollars spent on per-transaction fees
-  const calculateTransactionFeesDollars = () => {
-    if (!extractedData) return 0
-    
-    const { cardBreakdown, totalVolume } = extractedData
-    const avgTicket = 50
-    const estimatedTotalTransactions = totalVolume / avgTicket
-    
-    let totalPerTransactionCosts = 0
-    Object.entries(cardBreakdown).forEach(([_, data]) => {
-      const cardTransactions = data.volume / avgTicket
-      totalPerTransactionCosts += (data.perTransactionFee * cardTransactions)
-    })
-    
-    return totalPerTransactionCosts
+    return calculateModel(selectedPricingModel as PricingModel, currentRates(), extractedData)
   }
 
   // True effective rate = all fees paid / total volume (from actual statement)
   const calculateEffectiveRate = () => {
-    if (!extractedData || !extractedData.totalVolume) return 0
-    return (extractedData.totalFees / extractedData.totalVolume) * 100
+    if (!extractedData) return 0
+    return currentEffectiveRate(extractedData)
   }
 
-  // Computed current cost (sum of processing fees + transaction fees)
-  const computedCurrentCost = extractedData ? (calculateProcessingFeesDollars() + calculateTransactionFeesDollars()) : 0
-
-  // Calculate total fees for a specific card type
+  // Total fees for a specific card type (rate-based + per-transaction)
   const calculateCardFees = (cardData: any) => {
-    const avgTicket = cardData.averageTicketSize || extractedData?.averageTicketSize || 50
-    const cardTransactions = cardData.transactionCount && cardData.transactionCount > 0
-      ? cardData.transactionCount
-      : (avgTicket > 0 ? (cardData.volume / avgTicket) : 0)
-
-    // Card fees = percentage-based fees + per-transaction fees
-    const rateBasedFees = cardData.volume * cardData.rate
-    const transactionBasedFees = (cardData.perTransactionFee || 0) * cardTransactions
-
-    return rateBasedFees + transactionBasedFees
-  }
-
-  // Calculate rate-based fees for a specific card
-  const calculateCardRateBasedFees = (cardData: any) => {
-    return cardData.volume * cardData.rate
-  }
-
-  // Calculate transaction-based fees for a specific card
-  const calculateCardTransactionBasedFees = (cardData: any) => {
-    const avgTicket = cardData.averageTicketSize || extractedData?.averageTicketSize || 50
-    const cardTransactions = cardData.transactionCount && cardData.transactionCount > 0
-      ? cardData.transactionCount
-      : (avgTicket > 0 ? (cardData.volume / avgTicket) : 0)
-    return (cardData.perTransactionFee || 0) * cardTransactions
+    return cardFees(cardData, extractedData?.averageTicketSize)
   }
 
   // Save current analysis
@@ -560,7 +273,6 @@ export default function ProcessingCalculator() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(username ? { 'x-username': username } : {})
         },
         body: JSON.stringify({
           accountName: accountName.trim(),
@@ -619,7 +331,6 @@ export default function ProcessingCalculator() {
       const username = localStorage.getItem('username') ?? ''
       const res = await fetch(`/api/analyses/${id}`, {
         method: 'DELETE',
-        headers: username ? { 'x-username': username } : {}
       })
       if (!res.ok) {
         alert('Failed to delete analysis.')
@@ -674,6 +385,7 @@ export default function ProcessingCalculator() {
               </button>
             </div>
           )}
+
         </div>
 
         {/* Saved Analyses List */}
@@ -864,6 +576,24 @@ export default function ProcessingCalculator() {
                     ) : null}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Extraction Validation Warnings */}
+          {extractedData.validationWarnings && extractedData.validationWarnings.length > 0 && (
+            <div className="mb-8">
+              <h3 className="text-xl font-bold mb-4 text-gray-900 dark:text-white">🔍 Extraction Checks</h3>
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-xl p-4 space-y-2">
+                <p className="text-xs font-semibold text-red-700 dark:text-red-300 uppercase tracking-wider">
+                  The extracted numbers didn't fully reconcile — verify against the statement before quoting
+                </p>
+                {extractedData.validationWarnings.map((warning, i) => (
+                  <div key={i} className="flex items-start gap-2">
+                    <span className="text-red-500 mt-0.5 flex-shrink-0">•</span>
+                    <p className="text-sm text-red-800 dark:text-red-200">{warning}</p>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -1194,28 +924,30 @@ export default function ProcessingCalculator() {
             if (!newCosts) return null
             
             const currentCost = extractedData.totalFees
-            const monthlySavings = currentCost - newCosts.totalCost
+            const monthlySavings = currentCost - newCosts.merchantCost
             const annualSavings = monthlySavings * 12
             const monthlyProfit = newCosts.profit
             const annualProfit = monthlyProfit * 12
             const monthlyResidual = (annualProfit * 0.15) / 12
-            // Use actual interchange from statement, fall back to estimate only if unavailable
-            const actualInterchange = extractedData.totalInterchange > 0
-              ? extractedData.totalInterchange
-              : newCosts.estimatedInterchange
             
             return (
               <div className="mt-10 pt-8 border-t-2 border-gray-300 dark:border-slate-600">
                 <h3 className="text-2xl font-bold mb-6 text-gray-900 dark:text-white">
                   💡 Projected Analysis
                 </h3>
+
+                {newCosts.interchangeEstimated && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-4">
+                    ⚠️ Interchange was not found on the statement — profit figures use an estimated card mix and may vary.
+                  </p>
+                )}
                 
                 {/* Main Metrics */}
                 <div className={`grid md:grid-cols-2 ${showProfit ? 'lg:grid-cols-2 xl:grid-cols-5' : 'lg:grid-cols-2'} gap-6 mb-8`}>
                   <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/30 p-6 rounded-xl border border-blue-200 dark:border-blue-700">
                     <p className="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider">New Monthly Cost</p>
                     <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-2">
-                      {formatCurrency(newCosts.totalCost)}
+                      {formatCurrency(newCosts.merchantCost)}
                     </p>
                     <p className="text-xs text-blue-600 dark:text-blue-400 mt-2 font-medium">
                       vs {formatCurrency(currentCost)} current
@@ -1289,6 +1021,74 @@ export default function ProcessingCalculator() {
                     </div>
                   </div>
                 </div>
+
+                {/* Side-by-side Model Comparison */}
+                {(() => {
+                  const comparisons = compareModels(currentRates(), extractedData)
+                  if (comparisons.length < 2) return null
+                  const bestProfit = Math.max(...comparisons.map(c => c.result.profit))
+                  const bestSavings = Math.max(...comparisons.map(c => currentCost - c.result.merchantCost))
+                  return (
+                    <div className="mb-8">
+                      <h4 className="text-lg font-bold text-gray-900 dark:text-white mb-2 flex items-center gap-2">⚖️ Model Comparison</h4>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                        All pricing models with rates entered, side by side
+                      </p>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b-2 border-gray-300 dark:border-slate-600 text-left">
+                              <th className="py-3 pr-4 font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider text-xs">Model</th>
+                              <th className="py-3 pr-4 font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider text-xs">Merchant Cost/mo</th>
+                              <th className="py-3 pr-4 font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider text-xs">Effective Rate</th>
+                              <th className="py-3 pr-4 font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider text-xs">Merchant Savings/mo</th>
+                              {showProfit && (
+                                <>
+                                  <th className="py-3 pr-4 font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider text-xs">Profit/mo</th>
+                                  <th className="py-3 font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider text-xs">ARR</th>
+                                </>
+                              )}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {comparisons.map(({ model, label, result }) => {
+                              const savings = currentCost - result.merchantCost
+                              const isSelected = model === selectedPricingModel
+                              return (
+                                <tr
+                                  key={model}
+                                  className={`border-b border-gray-200 dark:border-slate-700 ${isSelected ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}
+                                >
+                                  <td className="py-3 pr-4 font-semibold text-gray-900 dark:text-white">
+                                    {label}{isSelected ? ' ✓' : ''}
+                                  </td>
+                                  <td className="py-3 pr-4 text-gray-800 dark:text-gray-200">{formatCurrency(result.merchantCost)}</td>
+                                  <td className="py-3 pr-4 text-gray-800 dark:text-gray-200">{result.effectiveRate.toFixed(2)}%</td>
+                                  <td className={`py-3 pr-4 font-semibold ${savings >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                                    {savings >= 0 ? '+' : ''}{formatCurrency(savings)}
+                                    {savings === bestSavings && comparisons.length > 1 ? ' 🏆' : ''}
+                                  </td>
+                                  {showProfit && (
+                                    <>
+                                      <td className="py-3 pr-4 font-semibold text-gray-800 dark:text-gray-200">
+                                        {formatCurrency(result.profit)}
+                                        {result.profit === bestProfit && comparisons.length > 1 ? ' 🏆' : ''}
+                                      </td>
+                                      <td className="py-3 font-bold text-purple-600 dark:text-purple-400">{formatCurrency(result.profit * 12)}</td>
+                                    </>
+                                  )}
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-3 italic">
+                        Dual pricing shows $0 merchant cost because card fees are passed to the customer.
+                      </p>
+                    </div>
+                  )
+                })()}
               </div>
             )
           })()}

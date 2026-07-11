@@ -2,12 +2,10 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { analyses } from '@/lib/schema'
 import { eq, and } from 'drizzle-orm'
+import { verifyToken } from '@/lib/auth'
 
 function getUsernameFromRequest(request: NextRequest): string | null {
-  const usernameHeader = request.headers.get('x-username')
-  if (usernameHeader) return usernameHeader
-  const usernameCookie = request.cookies.get('username')?.value
-  return usernameCookie ?? null
+  return verifyToken(request.cookies.get('authToken')?.value)
 }
 
 export async function DELETE(
