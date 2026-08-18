@@ -72,26 +72,15 @@ export function getTransactionCount(data: ExtractedData): { count: number; estim
   return { count: Math.round(data.totalVolume / avgTicket), estimated: true }
 }
 
-/** Estimate interchange from a typical retail/restaurant card mix when the statement doesn't show it */
-export function estimateInterchange(totalVolume: number, transactionCount: number): number {
-  // 60% regulated/basic debit, 15% basic credit, 15% consumer credit, 10% rewards credit
-  const mix = [
-    { share: 0.6, rate: 0.0119, perTxn: 0.12 },
-    { share: 0.15, rate: 0.0235, perTxn: 0.1 },
-    { share: 0.15, rate: 0.025, perTxn: 0.08 },
-    { share: 0.1, rate: 0.028, perTxn: 0.12 },
-  ]
-  return mix.reduce(
-    (sum, m) => sum + totalVolume * m.share * m.rate + transactionCount * m.share * m.perTxn,
-    0
-  )
+/** Fallback interchange estimate when statement interchange is unavailable */
+export function estimateInterchange(totalVolume: number): number {
+  return totalVolume * 0.021
 }
 
 /** Interchange to use in projections: actual from statement, else card-mix estimate */
 export function getInterchange(data: ExtractedData): { amount: number; estimated: boolean } {
   if (data.totalInterchange > 0) return { amount: data.totalInterchange, estimated: false }
-  const { count } = getTransactionCount(data)
-  return { amount: estimateInterchange(data.totalVolume, count), estimated: true }
+  return { amount: estimateInterchange(data.totalVolume), estimated: true }
 }
 
 /** Merchant's current all-in effective rate from the statement */
