@@ -20,8 +20,14 @@ interface SavedAnalysis {
   rates: Rates
 }
 
+interface UploadedFileItem {
+  id: string
+  file: File
+  note: string
+}
+
 export default function ProcessingCalculator() {
-  const [files, setFiles] = useState<File[]>([])
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFileItem[]>([])
   const [loading, setLoading] = useState(false)
   const [extractedData, setExtractedData] = useState<ExtractedData | null>(null)
   const [selectedPricingModel, setSelectedPricingModel] = useState<string>('interchange_plus')
@@ -95,19 +101,54 @@ export default function ProcessingCalculator() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const fileArray = Array.from(e.target.files)
-      console.log('Files selected:', fileArray.length)
-      setFiles(fileArray)
+      console.log('Files selected in picker:', fileArray.length)
+
+      // Preserve already-selected files so users can add files in multiple picker actions.
+      setUploadedFiles((current) => {
+        const existingKeys = new Set(current.map(({ file }) => `${file.name}-${file.size}-${file.lastModified}`))
+        const additions = fileArray
+          .filter((file) => !existingKeys.has(`${file.name}-${file.size}-${file.lastModified}`))
+          .map((file) => ({
+            id: `${file.name}-${file.size}-${file.lastModified}`,
+            file,
+            note: ''
+          }))
+
+        return [...current, ...additions]
+      })
+
+      // Reset input so selecting the same file again still triggers onChange.
+      e.target.value = ''
     }
   }
 
+  const updateFileNote = (id: string, note: string) => {
+    setUploadedFiles((current) =>
+      current.map((item) => (item.id === id ? { ...item, note } : item))
+    )
+  }
+
+  const removeFile = (id: string) => {
+    setUploadedFiles((current) => current.filter((item) => item.id !== id))
+  }
+
   const analyzeStatement = async () => {
-    if (files.length === 0) return
+    if (uploadedFiles.length === 0) return
 
     setLoading(true)
     const formData = new FormData()
-    files.forEach((file, index) => {
-      formData.append(`files`, file)
+    uploadedFiles.forEach(({ file }) => {
+      formData.append('files', file)
     })
+    formData.append(
+      'fileContexts',
+      JSON.stringify(
+        uploadedFiles.map(({ file, note }) => ({
+          fileName: file.name,
+          note: note.trim()
+        }))
+      )
+    )
 
     try {
       const response = await fetch('/api/analyze-statement', {
@@ -457,14 +498,44 @@ export default function ProcessingCalculator() {
               className="block w-full text-sm text-gray-500 file:mr-4 file:py-3 file:px-6 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-gradient-to-r file:from-blue-600 file:to-indigo-600 file:text-white hover:file:from-blue-700 hover:file:to-indigo-700 dark:file:from-blue-500 dark:file:to-indigo-500 cursor-pointer transition-all duration-200"
             />
           </div>
-          {files.length > 0 && (
-            <div className="text-sm font-medium text-blue-600 dark:text-blue-400 flex items-center gap-2">
-              ✓ {files.length} file{files.length !== 1 ? 's' : ''} selected
+          {uploadedFiles.length > 0 && (
+            <div className="space-y-3">
+              <div className="text-sm font-medium text-blue-600 dark:text-blue-400 flex items-center gap-2">
+                ✓ {uploadedFiles.length} file{uploadedFiles.length !== 1 ? 's' : ''} selected
+              </div>
+              <div className="space-y-3">
+                {uploadedFiles.map((item, index) => (
+                  <div
+                    key={item.id}
+                    className="border border-gray-200 dark:border-slate-600 rounded-lg p-3 bg-gray-50 dark:bg-slate-700/60"
+                  >
+                    <div className="flex items-start justify-between gap-3 mb-2">
+                      <p className="text-sm font-semibold text-gray-800 dark:text-gray-100 break-all">
+                        {index + 1}. {item.file.name}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => removeFile(item.id)}
+                        className="text-xs font-semibold text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Short note (e.g., account rates, account financials)"
+                      value={item.note}
+                      onChange={(e) => updateFileNote(item.id, e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-slate-500 rounded-md dark:bg-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-sm"
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           <button
             onClick={analyzeStatement}
-            disabled={files.length === 0 || loading}
+            disabled={uploadedFiles.length === 0 || loading}
             className="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-400 disabled:cursor-not-allowed font-semibold shadow-md transition-all duration-200 flex items-center justify-center gap-2"
           >
             {loading ? '⏳ Analyzing...' : '🚀 Analyze Statement'}

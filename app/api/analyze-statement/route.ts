@@ -150,6 +150,24 @@ export async function POST(request: NextRequest) {
 
     const formData = await request.formData()
     const files = formData.getAll('files') as File[]
+    const rawFileContexts = formData.get('fileContexts')
+
+    let fileContexts: Array<{ fileName: string; note: string }> = []
+    if (typeof rawFileContexts === 'string') {
+      try {
+        const parsed = JSON.parse(rawFileContexts)
+        if (Array.isArray(parsed)) {
+          fileContexts = parsed
+            .map((entry) => ({
+              fileName: typeof entry?.fileName === 'string' ? entry.fileName : '',
+              note: typeof entry?.note === 'string' ? entry.note.trim() : '',
+            }))
+            .filter((entry) => entry.fileName.length > 0)
+        }
+      } catch (e) {
+        console.warn('Failed to parse fileContexts payload:', e)
+      }
+    }
 
     if (files.length === 0) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 })
@@ -160,7 +178,13 @@ export async function POST(request: NextRequest) {
       { apiVersion: 'v1beta' }
     )
     
-    const prompt = `You are an expert payment processing analyst. Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response.
+    const contextBlock = fileContexts.length
+      ? `\n\nUSER-PROVIDED FILE NOTES (use these only as context, not as facts unless supported by the document content):\n${fileContexts
+          .map((entry, index) => `${index + 1}. ${entry.fileName}: ${entry.note || 'No note provided'}`)
+          .join('\n')}`
+      : ''
+
+    const prompt = `You are an expert payment processing analyst. Analyze these credit card processing statement images (may be multiple pages of the same statement). Extract and COMBINE all information across all pages into a single JSON response.${contextBlock}
 
 CRITICAL MINDSET: Processing statements are layered financial documents. Processors intentionally use vague terminology, overlapping categories, and inconsistent naming conventions. NEVER trust labels at face value — classify fees semantically, infer relationships mathematically, and compare totals against expected industry behavior.
 
