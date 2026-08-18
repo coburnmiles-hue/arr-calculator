@@ -1018,7 +1018,7 @@ export default function ProcessingCalculator() {
 
                 {newCosts.interchangeEstimated && (
                   <p className="text-xs text-amber-600 dark:text-amber-400 mb-4">
-                    ⚠️ Interchange was not found on the statement — profit figures use an estimated card mix and may vary.
+                    ⚠️ Interchange was not found on the statement — projections are using a 2.15% interchange fallback (2.15% × total volume).
                   </p>
                 )}
                 

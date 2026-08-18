@@ -74,7 +74,7 @@ export function getTransactionCount(data: ExtractedData): { count: number; estim
 
 /** Fallback interchange estimate when statement interchange is unavailable */
 export function estimateInterchange(totalVolume: number): number {
-  return totalVolume * 0.021
+  return totalVolume * 0.0215
 }
 
 /** Interchange to use in projections: actual from statement, else card-mix estimate */
